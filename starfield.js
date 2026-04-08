@@ -1,4 +1,4 @@
-const STAR_COUNT = 80;
+const STAR_COUNT = (('ontouchstart' in window) || (navigator.maxTouchPoints > 0)) ? 40 : 80;
 const MIN_RADIUS = 0.3;
 const MAX_RADIUS = 0.8;
 const MIN_OPACITY = 0.08;

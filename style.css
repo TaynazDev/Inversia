@@ -6,10 +6,12 @@ body {
   overflow: hidden;
   background: #000;
   font-family: 'Courier New', monospace;
+  touch-action: none;
 }
 
 body {
   position: relative;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #gameCanvas {
@@ -25,4 +27,12 @@ body {
   width: 100vw;
   height: 100vh;
   pointer-events: none;
+}
+
+button,
+input,
+[role='button'] {
+  min-width: 44px;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
 }

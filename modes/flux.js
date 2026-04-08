@@ -9,8 +9,8 @@ const HEALTH_BAR_WIDTH = 60;
 const HEALTH_BAR_HEIGHT = 2;
 const HEALTH_BAR_OFFSET_Y = 34;
 const MOVE_ACCELERATION = 0.9;
-const MAX_SPEED = 7;
-const DECELERATION = 0.82;
+const MAX_SPEED = 5;
+const DECELERATION = 0.88;
 const PLAYER_SHOT_COOLDOWN_MS = 200;
 const PLAYER_BULLET_WIDTH = 2;
 const PLAYER_BULLET_HEIGHT = 10;
@@ -33,6 +33,7 @@ const ENEMY_DIVE_MIN_MS = 1500;
 const ENEMY_DIVE_MAX_MS = 3000;
 const ENEMY_DIVE_SPEED_X = 0.8;
 const ENEMY_DIVE_SPEED_Y = 1.35;
+const ENEMY_DIVE_TRACK_Y_SPEED = 0.55;
 const ENEMY_RETURN_SPEED = 2.1;
 const ENEMY_SHOT_MIN_MS = 2000;
 const ENEMY_SHOT_MAX_MS = 3000;
@@ -62,11 +63,15 @@ let currentContext = null;
 let resizeHandler = null;
 let keydownHandler = null;
 let keyupHandler = null;
+let touchControls = null;
+let lastFrameTime = 0;
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 
 let fluxState = {
   x: 0,
   y: 0,
   velocityX: 0,
+  velocityY: 0,
   health: PLAYER_MAX_HEALTH,
   playerBullets: [],
   powerUps: [],
@@ -88,7 +93,11 @@ let fluxState = {
   input: {
     left: false,
     right: false,
+    up: false,
+    down: false,
     fire: false,
+    axisX: 0,
+    axisY: 0,
   },
 };
 
@@ -110,6 +119,10 @@ function syncCanvasResolution(canvas, ctx) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function getPlayerBoundaryY(canvasHeight) {
+  return canvasHeight * 0.6;
 }
 
 function getFormationLayout(canvas) {
@@ -174,6 +187,10 @@ function scheduleNextEnemyShot(now) {
 }
 
 function handleKeyChange(event, isDown) {
+  if (isTouchDevice) {
+    return;
+  }
+
   const key = event.key.toLowerCase();
 
   if (key === 'arrowleft' || key === 'a') {
@@ -182,6 +199,14 @@ function handleKeyChange(event, isDown) {
 
   if (key === 'arrowright' || key === 'd') {
     fluxState.input.right = isDown;
+  }
+
+  if (key === 'arrowup' || key === 'w') {
+    fluxState.input.up = isDown;
+  }
+
+  if (key === 'arrowdown' || key === 's') {
+    fluxState.input.down = isDown;
   }
 
   if (key === ' ' || key === 'spacebar') {
@@ -207,12 +232,12 @@ function spawnPowerUp(x, y) {
   fluxState.powerUps.push(pu);
 }
 
-function updatePowerups(canvas, now) {
+function updatePowerups(canvas, now, dt) {
   const canvasHeight = canvas.clientHeight || window.innerHeight;
   const { POWERUP_DRIFT_SPEED } = currentContext;
 
   for (const pu of fluxState.powerUps) {
-    pu.y += POWERUP_DRIFT_SPEED;
+    pu.y += POWERUP_DRIFT_SPEED * dt;
   }
 
   fluxState.powerUps = fluxState.powerUps.filter((pu) => pu.y - pu.radius <= canvasHeight);
@@ -348,10 +373,10 @@ function updatePlayerShooting(now) {
   fluxState.nextPlayerShotAt = now + PLAYER_SHOT_COOLDOWN_MS;
 }
 
-function updatePlayerBullets(canvas) {
+function updatePlayerBullets(canvas, dt) {
   for (const bullet of fluxState.playerBullets) {
-    bullet.x += bullet.vx;
-    bullet.y += bullet.vy;
+    bullet.x += bullet.vx * dt;
+    bullet.y += bullet.vy * dt;
   }
 
   fluxState.playerBullets = fluxState.playerBullets.filter(
@@ -451,14 +476,14 @@ function spawnBoss(canvas) {
   updateBossHpHud();
 }
 
-function updateBoss(canvas, now) {
+function updateBoss(canvas, now, dt) {
   const boss = fluxState.boss;
   if (!boss || boss.hp <= 0) return;
 
   const canvasWidth = canvas.clientWidth || window.innerWidth;
   const margin = BOSS_WIDTH / 2 + 30;
 
-  boss.x += boss.direction * BOSS_DRIFT_SPEED;
+  boss.x += boss.direction * BOSS_DRIFT_SPEED * dt;
   if (boss.x <= margin) { boss.direction = 1; boss.x = margin; }
   if (boss.x >= canvasWidth - margin) { boss.direction = -1; boss.x = canvasWidth - margin; }
 
@@ -493,10 +518,10 @@ function updateBoss(canvas, now) {
   }
 }
 
-function updateBossBullets(canvas) {
+function updateBossBullets(canvas, dt) {
   for (const b of fluxState.bossBullets) {
-    b.x += b.vx;
-    b.y += b.vy;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
   }
   const w = canvas.clientWidth || window.innerWidth;
   const h = canvas.clientHeight || window.innerHeight;
@@ -592,39 +617,217 @@ function removeBossHpHud() {
   currentContext.gameState.bossMaxHp = 1;
 }
 
-function updatePlayer(canvas) {
+function setupTouchControls() {
+  if (!isTouchDevice || !currentContext?.uiLayer || touchControls) {
+    return;
+  }
+
+  const container = document.createElement('div');
+  container.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:6;';
+
+  const joyBase = document.createElement('div');
+  joyBase.style.cssText = 'position:fixed;width:88px;height:88px;border-radius:50%;background:rgba(255,255,255,0.04);border:0.5px solid rgba(255,255,255,0.12);display:none;pointer-events:none;';
+  const joyThumb = document.createElement('div');
+  joyThumb.style.cssText = 'position:absolute;left:24px;top:24px;width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,0.08);border:0.5px solid rgba(255,255,255,0.22);';
+  joyBase.appendChild(joyThumb);
+
+  const fire = document.createElement('button');
+  fire.type = 'button';
+  fire.style.cssText = 'position:fixed;right:22px;bottom:20px;width:72px;height:72px;border-radius:50%;background:rgba(0,255,120,0.07);border:0.5px solid rgba(0,255,120,0.25);color:rgba(0,255,120,.95);display:flex;align-items:center;justify-content:center;pointer-events:auto;';
+  fire.textContent = '▲';
+
+  const shield = document.createElement('button');
+  shield.type = 'button';
+  shield.style.cssText = 'position:fixed;right:30px;bottom:102px;width:56px;height:56px;border-radius:50%;background:rgba(0,238,255,0.07);border:0.5px solid rgba(0,238,255,0.25);color:rgba(0,238,255,.95);display:none;pointer-events:auto;';
+  shield.textContent = '◉';
+
+  container.append(joyBase, fire, shield);
+  currentContext.uiLayer.appendChild(container);
+
+  let fireInterval = null;
+  let joyTouchId = null;
+  let joyCenterX = 0;
+  let joyCenterY = 0;
+  const baseRadius = 44;
+  const maxOffset = 44;
+
+  const beginFiring = () => {
+    fluxState.input.fire = true;
+    if (fireInterval !== null) {
+      return;
+    }
+    fireInterval = window.setInterval(() => {
+      fluxState.input.fire = true;
+    }, 200);
+  };
+
+  const stopFiring = () => {
+    fluxState.input.fire = false;
+    if (fireInterval !== null) {
+      window.clearInterval(fireInterval);
+      fireInterval = null;
+    }
+  };
+
+  fire.addEventListener('touchstart', (event) => {
+    event.preventDefault();
+    beginFiring();
+  }, { passive: false });
+  fire.addEventListener('touchend', stopFiring);
+  fire.addEventListener('touchcancel', stopFiring);
+
+  shield.addEventListener('touchstart', (event) => {
+    event.preventDefault();
+    if (fluxState.shieldActive) {
+      fluxState.shieldActive = true;
+    }
+  }, { passive: false });
+
+  window.addEventListener('touchstart', (event) => {
+    if (joyTouchId !== null) {
+      return;
+    }
+    const touch = event.changedTouches[0];
+    if (!touch || touch.clientX > window.innerWidth * 0.5) {
+      return;
+    }
+    joyTouchId = touch.identifier;
+    joyCenterX = touch.clientX;
+    joyCenterY = touch.clientY;
+    joyBase.style.display = 'block';
+    joyBase.style.left = `${joyCenterX - baseRadius}px`;
+    joyBase.style.top = `${joyCenterY - baseRadius}px`;
+  }, { passive: true });
+
+  window.addEventListener('touchmove', (event) => {
+    if (joyTouchId === null) {
+      return;
+    }
+    const touch = Array.from(event.changedTouches).find((t) => t.identifier === joyTouchId);
+    if (!touch) {
+      return;
+    }
+    const dx = touch.clientX - joyCenterX;
+    const dy = touch.clientY - joyCenterY;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const clamped = Math.min(maxOffset, dist);
+    const nx = (dx / dist) * clamped;
+    const ny = (dy / dist) * clamped;
+    joyThumb.style.left = `${24 + nx}px`;
+    joyThumb.style.top = `${24 + ny}px`;
+    fluxState.input.axisX = clamp(nx / maxOffset, -1, 1);
+    fluxState.input.axisY = clamp(ny / maxOffset, -1, 1);
+    fluxState.input.left = fluxState.input.axisX < -0.08;
+    fluxState.input.right = fluxState.input.axisX > 0.08;
+    fluxState.input.up = fluxState.input.axisY < -0.08;
+    fluxState.input.down = fluxState.input.axisY > 0.08;
+  }, { passive: true });
+
+  const endJoystickTouch = (event) => {
+    if (joyTouchId === null) {
+      return;
+    }
+    const touch = Array.from(event.changedTouches).find((t) => t.identifier === joyTouchId);
+    if (!touch) {
+      return;
+    }
+    joyTouchId = null;
+    joyBase.style.display = 'none';
+    joyThumb.style.left = '24px';
+    joyThumb.style.top = '24px';
+    fluxState.input.axisX = 0;
+    fluxState.input.axisY = 0;
+    fluxState.input.left = false;
+    fluxState.input.right = false;
+    fluxState.input.up = false;
+    fluxState.input.down = false;
+  };
+
+  window.addEventListener('touchend', endJoystickTouch, { passive: true });
+  window.addEventListener('touchcancel', endJoystickTouch, { passive: true });
+
+  touchControls = {
+    container,
+    update() {
+      shield.style.display = fluxState.shieldActive ? 'block' : 'none';
+    },
+    cleanup() {
+      stopFiring();
+      if (container.parentElement) {
+        container.parentElement.removeChild(container);
+      }
+    },
+  };
+}
+
+function removeTouchControls() {
+  touchControls?.cleanup?.();
+  touchControls = null;
+}
+
+function updatePlayer(canvas, dt) {
   const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  const boundaryY = getPlayerBoundaryY(height);
   const minX = PLAYER_WIDTH / 2;
   const maxX = width - PLAYER_WIDTH / 2;
+  const minY = boundaryY + PLAYER_HEIGHT / 2;
+  const maxY = height - PLAYER_HEIGHT / 2;
 
-  if (fluxState.input.left) {
-    fluxState.velocityX -= MOVE_ACCELERATION;
+  if (isTouchDevice && Math.abs(fluxState.input.axisX) > 0.01) {
+    fluxState.velocityX += fluxState.input.axisX * MOVE_ACCELERATION * dt;
+  } else {
+    if (fluxState.input.left) {
+      fluxState.velocityX -= MOVE_ACCELERATION * dt;
+    }
+
+    if (fluxState.input.right) {
+      fluxState.velocityX += MOVE_ACCELERATION * dt;
+    }
   }
 
-  if (fluxState.input.right) {
-    fluxState.velocityX += MOVE_ACCELERATION;
+  if (isTouchDevice && Math.abs(fluxState.input.axisY) > 0.01) {
+    fluxState.velocityY += fluxState.input.axisY * MOVE_ACCELERATION * dt;
+  } else {
+    if (fluxState.input.up) {
+      fluxState.velocityY -= MOVE_ACCELERATION * dt;
+    }
+
+    if (fluxState.input.down) {
+      fluxState.velocityY += MOVE_ACCELERATION * dt;
+    }
   }
 
-  if (!fluxState.input.left && !fluxState.input.right) {
-    fluxState.velocityX *= DECELERATION;
+  if (!fluxState.input.left && !fluxState.input.right && Math.abs(fluxState.input.axisX) < 0.01) {
+    fluxState.velocityX *= Math.pow(DECELERATION, dt);
     if (Math.abs(fluxState.velocityX) < 0.02) {
       fluxState.velocityX = 0;
     }
   }
 
+  if (!fluxState.input.up && !fluxState.input.down && Math.abs(fluxState.input.axisY) < 0.01) {
+    fluxState.velocityY *= Math.pow(DECELERATION, dt);
+    if (Math.abs(fluxState.velocityY) < 0.02) {
+      fluxState.velocityY = 0;
+    }
+  }
+
   fluxState.velocityX = clamp(fluxState.velocityX, -MAX_SPEED, MAX_SPEED);
-  fluxState.x += fluxState.velocityX;
+  fluxState.velocityY = clamp(fluxState.velocityY, -MAX_SPEED, MAX_SPEED);
+  fluxState.x += fluxState.velocityX * dt;
+  fluxState.y += fluxState.velocityY * dt;
   fluxState.x = clamp(fluxState.x, minX, maxX);
+  fluxState.y = clamp(fluxState.y, minY, maxY);
 }
 
-function updateEnemyFormation(canvas, now) {
+function updateEnemyFormation(canvas, now, dt) {
   const canvasWidth = canvas.clientWidth || window.innerWidth;
   const canvasHeight = canvas.clientHeight || window.innerHeight;
   const layout = getFormationLayout(canvas);
   const waveSpeedMultiplier = currentContext.waveController.getDriftMultiplier();
 
   fluxState.enemyFormationOffsetX +=
-    fluxState.enemyFormationDirection * ENEMY_BASE_DRIFT_SPEED * waveSpeedMultiplier;
+    fluxState.enemyFormationDirection * ENEMY_BASE_DRIFT_SPEED * waveSpeedMultiplier * dt;
 
   const leftEdge = layout.startX + fluxState.enemyFormationOffsetX - ENEMY_WIDTH / 2;
   const rightEdge =
@@ -662,8 +865,18 @@ function updateEnemyFormation(canvas, now) {
 
     if (enemy.state === 'diving') {
       const deltaX = enemy.diveTargetX - enemy.x;
-      enemy.x += clamp(deltaX, -ENEMY_DIVE_SPEED_X, ENEMY_DIVE_SPEED_X);
-      enemy.y += ENEMY_DIVE_SPEED_Y;
+      enemy.x += clamp(deltaX, -ENEMY_DIVE_SPEED_X * dt, ENEMY_DIVE_SPEED_X * dt);
+      enemy.y += ENEMY_DIVE_SPEED_Y * dt;
+
+      const boundaryY = getPlayerBoundaryY(canvasHeight);
+      if (enemy.y >= boundaryY) {
+        const deltaY = fluxState.y - enemy.y;
+        enemy.y += clamp(
+          deltaY,
+          -ENEMY_DIVE_TRACK_Y_SPEED * dt,
+          ENEMY_DIVE_TRACK_Y_SPEED * dt,
+        );
+      }
 
       if (enemy.y - ENEMY_HEIGHT / 2 > canvasHeight) {
         enemy.state = 'returning';
@@ -676,8 +889,8 @@ function updateEnemyFormation(canvas, now) {
       const dx = home.x - enemy.x;
       const dy = home.y - enemy.y;
 
-      enemy.x += clamp(dx, -ENEMY_RETURN_SPEED, ENEMY_RETURN_SPEED);
-      enemy.y += clamp(dy, -ENEMY_RETURN_SPEED, ENEMY_RETURN_SPEED);
+      enemy.x += clamp(dx, -ENEMY_RETURN_SPEED * dt, ENEMY_RETURN_SPEED * dt);
+      enemy.y += clamp(dy, -ENEMY_RETURN_SPEED * dt, ENEMY_RETURN_SPEED * dt);
 
       if (Math.abs(dx) < ENEMY_RETURN_SPEED && Math.abs(dy) < ENEMY_RETURN_SPEED) {
         enemy.x = home.x;
@@ -688,7 +901,7 @@ function updateEnemyFormation(canvas, now) {
   }
 }
 
-function updateEnemyBullets(canvas, now) {
+function updateEnemyBullets(canvas, now, dt) {
   if (now >= fluxState.nextEnemyShotAt) {
     if (fluxState.enemyBullets.length < ENEMY_MAX_BULLETS) {
       const shooters = fluxState.enemies.filter((enemy) => enemy.state !== 'returning');
@@ -710,7 +923,7 @@ function updateEnemyBullets(canvas, now) {
   const canvasHeight = canvas.clientHeight || window.innerHeight;
 
   for (const bullet of fluxState.enemyBullets) {
-    bullet.y += bullet.speedY;
+    bullet.y += bullet.speedY * dt;
   }
 
   fluxState.enemyBullets = fluxState.enemyBullets.filter(
@@ -735,12 +948,21 @@ function renderFrame(ctx) {
   const { drawTriangle, drawCircle, drawBullet } = currentContext;
   const width = ctx.canvas.clientWidth || window.innerWidth;
   const height = ctx.canvas.clientHeight || window.innerHeight;
+  const boundaryY = getPlayerBoundaryY(height);
 
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
   drawStarfield(ctx);
+
+  ctx.beginPath();
+  ctx.moveTo(0, boundaryY);
+  ctx.lineTo(width, boundaryY);
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 0.5;
+  ctx.stroke();
+  ctx.lineWidth = 1;
 
   drawTriangle(
     ctx,
@@ -799,9 +1021,12 @@ function renderFrame(ctx) {
     const pulseGlow = Math.sin(Date.now() * 0.004) * 12 + 22;
     const bossColor = boss.flashFrames > 0 ? '#ffffff' : BOSS_COLOR;
     const prevLW = ctx.lineWidth;
+    const prevAllowFullGlow = ctx.__allowFullGlow;
+    ctx.__allowFullGlow = true;
     ctx.lineWidth = BOSS_STROKE_WIDTH;
     drawTriangle(ctx, boss.x, boss.y, BOSS_WIDTH, BOSS_HEIGHT, 'down', bossColor, pulseGlow);
     ctx.lineWidth = prevLW;
+    ctx.__allowFullGlow = prevAllowFullGlow;
     if (boss.flashFrames > 0) boss.flashFrames -= 1;
   }
 
@@ -845,9 +1070,11 @@ function gameLoop() {
   }
 
   const { canvas, ctx, gameState } = currentContext;
+  const now = performance.now();
+  const dt = Math.max(0.5, Math.min(2.5, lastFrameTime > 0 ? (now - lastFrameTime) / 16.67 : 1));
+  lastFrameTime = now;
 
   if (!gameState.paused) {
-    const now = performance.now();
     const waveEvent = currentContext.waveController.update(now);
     if (waveEvent.action === 'spawn-boss') {
       spawnBoss(canvas);
@@ -856,24 +1083,25 @@ function gameLoop() {
     }
 
     if (currentContext.waveController.isCombatPhase()) {
-      updatePlayer(canvas);
+      updatePlayer(canvas, dt);
       updatePlayerShooting(now);
-      updatePlayerBullets(canvas);
+      updatePlayerBullets(canvas, dt);
 
       if (fluxState.bossPhase) {
-        updateBoss(canvas, now);
-        updateBossBullets(canvas);
+        updateBoss(canvas, now, dt);
+        updateBossBullets(canvas, dt);
         resolveBossCollisions();
       } else {
-        updateEnemyFormation(canvas, now);
-        updateEnemyBullets(canvas, now);
+        updateEnemyFormation(canvas, now, dt);
+        updateEnemyBullets(canvas, now, dt);
         resolveCollisions();
       }
 
-      updatePowerups(canvas, now);
+      updatePowerups(canvas, now, dt);
       checkWaveTransition(now);
     }
 
+    touchControls?.update?.();
     syncHudState(now);
     currentContext.hud?.updateHUD?.(currentContext.gameState);
     renderFrame(ctx);
@@ -906,6 +1134,7 @@ export function startFlux(context = currentContext) {
     x: (canvas.clientWidth || window.innerWidth) / 2,
     y: (canvas.clientHeight || window.innerHeight) - 70,
     velocityX: 0,
+    velocityY: 0,
     health: PLAYER_MAX_HEALTH,
     playerBullets: [],
     powerUps: [],
@@ -927,7 +1156,11 @@ export function startFlux(context = currentContext) {
     input: {
       left: false,
       right: false,
+      up: false,
+      down: false,
       fire: false,
+      axisX: 0,
+      axisY: 0,
     },
   };
 
@@ -949,6 +1182,8 @@ export function startFlux(context = currentContext) {
   syncHudState(performance.now());
   currentContext.hud?.showHUD?.();
   currentContext.hud?.updateHUD?.(currentContext.gameState);
+  lastFrameTime = 0;
+  setupTouchControls();
 
   resizeHandler = () => {
     const prevWidth = canvas.clientWidth || window.innerWidth;
@@ -994,9 +1229,12 @@ export function startFlux(context = currentContext) {
     }
 
     const minX = PLAYER_WIDTH / 2;
+    const boundaryY = getPlayerBoundaryY(canvas.clientHeight || window.innerHeight);
     const maxX = (canvas.clientWidth || window.innerWidth) - PLAYER_WIDTH / 2;
+    const minY = boundaryY + PLAYER_HEIGHT / 2;
+    const maxY = (canvas.clientHeight || window.innerHeight) - PLAYER_HEIGHT / 2;
     fluxState.x = clamp(fluxState.x, minX, maxX);
-    fluxState.y = clamp(fluxState.y, PLAYER_HEIGHT / 2, (canvas.clientHeight || window.innerHeight) - PLAYER_HEIGHT / 2);
+    fluxState.y = clamp(fluxState.y, minY, maxY);
   };
 
   keydownHandler = (event) => {
@@ -1058,10 +1296,17 @@ export function stopFlux() {
 
   fluxState.input.left = false;
   fluxState.input.right = false;
+  fluxState.input.up = false;
+  fluxState.input.down = false;
   fluxState.input.fire = false;
+  fluxState.input.axisX = 0;
+  fluxState.input.axisY = 0;
+  fluxState.velocityX = 0;
+  fluxState.velocityY = 0;
 
   removeBossHpHud();
   currentContext?.hud?.hidePauseMenu?.();
+  removeTouchControls();
 
   if (currentContext?.gameState?.mode === 'flux') {
     currentContext.gameState.running = false;
