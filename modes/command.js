@@ -13,8 +13,11 @@ const FIGHTER_COLOR = '#00ff88';
 const FIGHTER_GLOW = 10;
 const STARTING_FLEET_COUNT = 12;
 const MAX_FLEET_COUNT = 30;
+const MAYHEM_STARTING_FLEET_COUNT = 50;
+const MAYHEM_MAX_FLEET_COUNT = 50;
 // Y-offsets from mothership centre for each formation row
 const FLEET_ROW_Y = [-60, 0, 55];
+const MAYHEM_FLEET_ROW_Y = [-100, -65, 0, 50, 90];
 // Fleet HP bar
 const FLEET_BAR_WIDTH = 80;
 const FLEET_BAR_HEIGHT = 2;
@@ -28,9 +31,15 @@ const FIGHTER_FIRE_MAX_MS = 1200;
 const FIGHTER_BULLET_WIDTH = 2;
 const FIGHTER_BULLET_HEIGHT = 8;
 const FIGHTER_BULLET_SPEED = 8;
+const FLEET_VOLLEY_BASE_MS = 400;
+const FRIENDLY_BULLET_BASE_CAP = 20;
+const FRIENDLY_BULLET_PER_FIGHTER = 2;
 // Auto-hover in command mode
 const AUTO_HOVER_SPEED = 0.4;
 const AUTO_HOVER_RANGE = 40;
+const GROUP_SHIELD_RADIUS = SHIP_RADIUS + 80;
+const GROUP_SHIELD_MAX_HP = 30;
+const LASER_DURATION_FRAMES = 300;
 
 // ─── Tactical panel ──────────────────────────────────────────────────────────
 const TACTICAL_PANEL_HEIGHT = 160;
@@ -74,7 +83,6 @@ const PLAYER_FLASH_FRAMES_ON_HIT = 3;
 const SCORE_PER_KILL = 100;
 const COMMAND_MULTI_SPREAD_COUNT = 5;
 const COMMAND_MULTI_SPREAD_ANGLE = 0.26;
-const POWERUP_DROP_CHANCE = 0.15;
 
 // ─── Boss constants ───────────────────────────────────────────────────────────
 const BOSS_WIDTH = 80;
@@ -93,6 +101,19 @@ const BOSS_BULLET_HEIGHT = 12;
 const BOSS_BULLET_SPEED = 2.8;
 const BOSS_SCORE = 2000;
 
+const MAYHEM_BOSS_WIDTH = 58;
+const MAYHEM_BOSS_HEIGHT = 65;
+const MAYHEM_BOSS_HP = 12;
+const MAYHEM_BOSS_SCORE = 5000;
+const MAYHEM_SCORE_MULTIPLIER = 2;
+const MAYHEM_SYNC_VOLLEY_MS = 10000;
+const MAYHEM_BOSS_BURST_MS = 2500;
+const MAYHEM_BOSS_SPAWN_MS = 3000;
+const MAYHEM_GLOBAL_BULLET_CAP = 40;
+const MAYHEM_WAVE_CLEAR_PAUSE_MS = 2000;
+const MAYHEM_SCORE_KEY = 'inversia_mayhem_scores';
+const MAYHEM_BASE_DROP_POOL = ['shield', 'multi', 'fleet'];
+
 // ─── Module-level state ───────────────────────────────────────────────────────
 let animationFrameId = null;
 let currentContext = null;
@@ -104,6 +125,9 @@ let touchControls = null;
 let lastFrameTime = 0;
 let modeToggleEl = null;
 let tacticalPanelEl = null;
+let mayhemWaveBadgeEl = null;
+let mayhemUpgradeEl = null;
+let backspaceUi = null;
 const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 
 let commandState = {
@@ -116,6 +140,7 @@ let commandState = {
   fighterBullets: [],
   fleetCount: STARTING_FLEET_COUNT,
   fleetMaxCount: STARTING_FLEET_COUNT,
+  isMayhem: false,
   // Control mode
   ctrlMode: 'control',
   activeOrder: null,
@@ -140,6 +165,26 @@ let commandState = {
   boss: null,
   bossPhase: false,
   bossBullets: [],
+  mayhemWave: 1,
+  mayhemBosses: [],
+  mayhemSpawnedThisWave: 0,
+  mayhemWaveBossTarget: 0,
+  mayhemNextBossSpawnAt: 0,
+  mayhemNextSyncVolleyAt: 0,
+  mayhemSyncWarningUntil: 0,
+  mayhemTotalBossesDefeated: 0,
+  mayhemWavesCleared: 0,
+  mayhemWaveResumeAt: 0,
+  mayhemAwaitingUpgrade: false,
+  mayhemActiveDropPool: [...MAYHEM_BASE_DROP_POOL],
+  mayhemRotationNoticeUntil: 0,
+  nextFleetVolleyAt: 0,
+  fleetVolleyCooldownScale: 1,
+  groupShieldHp: 0,
+  backspaceCount: 0,
+  laserFramesRemaining: 0,
+  backspaceFlashFrames: 0,
+  activePowerupLabelColor: 'rgba(255,255,255,0.7)',
   input: {
     left: false,
     right: false,
@@ -173,6 +218,14 @@ function getPlayerBoundaryY(canvasHeight) {
   return canvasHeight * 0.6;
 }
 
+function getFleetRowOffsets() {
+  return commandState.isMayhem ? MAYHEM_FLEET_ROW_Y : FLEET_ROW_Y;
+}
+
+function getFleetCapacity() {
+  return commandState.isMayhem ? MAYHEM_MAX_FLEET_COUNT : MAX_FLEET_COUNT;
+}
+
 function getAabb(x, y, w, h) {
   return { left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2 };
 }
@@ -191,6 +244,18 @@ function overlapsAabb(a, b) {
  * up to 3 rows as [row0, row1, row2].
  */
 function getRowCounts(total) {
+  if (commandState.isMayhem) {
+    const counts = [0, 0, 0, 0, 0];
+    let remaining = Math.max(0, total);
+    for (let i = 0; i < counts.length; i += 1) {
+      const take = Math.min(10, remaining);
+      counts[i] = take;
+      remaining -= take;
+      if (remaining <= 0) break;
+    }
+    return counts;
+  }
+
   if (total <= 0) return [0, 0, 0];
   if (total <= 4) return [total, 0, 0];
   if (total <= 8) {
@@ -210,18 +275,19 @@ function getFormationTarget(row, col, totalInRow) {
   const spacing = 24;
   const totalWidth = Math.max(0, (totalInRow - 1)) * spacing;
   const dx = -totalWidth / 2 + col * spacing;
-  const dy = FLEET_ROW_Y[row] != null ? FLEET_ROW_Y[row] : 0;
+  const rows = getFleetRowOffsets();
+  const dy = rows[row] != null ? rows[row] : 0;
   return { tx: commandState.x + dx, ty: commandState.y + dy };
 }
 
 /**
  * Create an initial array of 12 fighter objects.
  */
-function initializeFighters() {
+function initializeFighters(totalCount = STARTING_FLEET_COUNT) {
   const fighters = [];
-  const counts = getRowCounts(STARTING_FLEET_COUNT);
+  const counts = getRowCounts(totalCount);
   let id = 0;
-  for (let row = 0; row < 3; row += 1) {
+  for (let row = 0; row < counts.length; row += 1) {
     for (let col = 0; col < counts[row]; col += 1) {
       fighters.push({
         id: `f${id += 1}`,
@@ -250,7 +316,7 @@ function recalculateFormation() {
   const alive = commandState.fighters.filter((f) => f.hp > 0);
   const counts = getRowCounts(alive.length);
   let idx = 0;
-  for (let row = 0; row < 3; row += 1) {
+  for (let row = 0; row < counts.length; row += 1) {
     for (let col = 0; col < counts[row]; col += 1) {
       if (idx < alive.length) {
         alive[idx].row = row;
@@ -263,13 +329,239 @@ function recalculateFormation() {
   commandState.fleetCount = alive.length;
 }
 
+function getAliveFighters() {
+  return commandState.fighters.filter((f) => f.hp > 0);
+}
+
+function getLaserDps() {
+  return 15 + (getAliveFighters().length * 0.05);
+}
+
+function getFriendlyBulletCap() {
+  const aliveCount = getAliveFighters().length;
+  return FRIENDLY_BULLET_BASE_CAP + Math.max(0, aliveCount * FRIENDLY_BULLET_PER_FIGHTER);
+}
+
+function canSpawnFriendlyBullet() {
+  return commandState.fighterBullets.length < getFriendlyBulletCap();
+}
+
+function triggerBackspaceLaser() {
+  if (commandState.laserFramesRemaining > 0) {
+    return;
+  }
+
+  if (commandState.backspaceCount <= 0) {
+    commandState.backspaceFlashFrames = 2;
+    return;
+  }
+
+  commandState.backspaceCount -= 1;
+  commandState.laserFramesRemaining = LASER_DURATION_FRAMES;
+}
+
+function applyBackspaceLaser(dt) {
+  if (commandState.laserFramesRemaining <= 0) {
+    return;
+  }
+
+  const laserX = commandState.x;
+  const laserDps = getLaserDps();
+
+  if (commandState.isMayhem) {
+    for (const boss of commandState.mayhemBosses) {
+      if (boss.hp <= 0) continue;
+      const left = boss.x - MAYHEM_BOSS_WIDTH / 2;
+      const right = boss.x + MAYHEM_BOSS_WIDTH / 2;
+      if (laserX >= left && laserX <= right) {
+        boss.hp -= laserDps * (dt / 60);
+        if (boss.hp <= 0 && !boss.droppedOnDeath) {
+          currentContext.gameState.score += MAYHEM_BOSS_SCORE * MAYHEM_SCORE_MULTIPLIER;
+          commandState.mayhemTotalBossesDefeated += 1;
+          spawnMayhemWavePowerUp(boss.x, boss.y);
+          boss.droppedOnDeath = true;
+          currentContext.audio?.playBossDeath?.();
+        }
+      }
+    }
+  } else {
+    const removedEnemyIds = new Set();
+    for (const enemy of commandState.enemies) {
+      if (Math.abs(enemy.x - laserX) <= 10) {
+        removedEnemyIds.add(enemy.id);
+        currentContext.gameState.score += 50;
+      }
+    }
+    if (removedEnemyIds.size > 0) {
+      commandState.enemies = commandState.enemies.filter((enemy) => !removedEnemyIds.has(enemy.id));
+    }
+
+    if (commandState.boss && commandState.boss.hp > 0) {
+      const left = commandState.boss.x - BOSS_WIDTH / 2;
+      const right = commandState.boss.x + BOSS_WIDTH / 2;
+      if (laserX >= left && laserX <= right) {
+        commandState.boss.hp -= laserDps * (dt / 60);
+      }
+    }
+  }
+
+  commandState.enemyBullets = commandState.enemyBullets.filter((bullet) => Math.abs(bullet.x - laserX) > 8);
+  commandState.bossBullets = commandState.bossBullets.filter((bullet) => Math.abs(bullet.x - laserX) > 8);
+
+  commandState.laserFramesRemaining = Math.max(0, commandState.laserFramesRemaining - dt);
+}
+
+function createBackspaceUi() {
+  if (backspaceUi || !currentContext?.uiLayer) {
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = [
+    'position:fixed',
+    'right:20px',
+    `bottom:${isTouchDevice ? 110 : 20}px`,
+    'z-index:11',
+    'pointer-events:auto',
+  ].join(';');
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.style.cssText = [
+    'width:52px',
+    'height:52px',
+    'border-radius:12px',
+    'border:0.5px solid rgba(255,255,255,0.2)',
+    'background:rgba(255,255,255,0.05)',
+    'backdrop-filter:blur(10px)',
+    '-webkit-backdrop-filter:blur(10px)',
+    'position:relative',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'cursor:pointer',
+  ].join(';');
+
+  const icon = document.createElement('div');
+  icon.textContent = '⟵';
+  icon.style.cssText = 'color:#fff;font-size:18px;line-height:1;';
+  button.appendChild(icon);
+
+  const badge = document.createElement('div');
+  badge.style.cssText = [
+    'position:absolute',
+    'right:-5px',
+    'bottom:-5px',
+    'width:18px',
+    'height:18px',
+    'border-radius:50%',
+    'background:#fff',
+    'color:#000',
+    'font-family:"Courier New", monospace',
+    'font-size:10px',
+    'font-weight:700',
+    'display:none',
+    'align-items:center',
+    'justify-content:center',
+  ].join(';');
+
+  const timer = document.createElement('div');
+  timer.style.cssText = [
+    'position:absolute',
+    'left:0',
+    'bottom:-8px',
+    'height:2px',
+    'width:52px',
+    'background:rgba(255,255,255,0.5)',
+    'display:none',
+  ].join(';');
+
+  const dpsLabel = document.createElement('div');
+  dpsLabel.style.cssText = [
+    'position:absolute',
+    'left:0',
+    'bottom:-20px',
+    'width:52px',
+    'text-align:center',
+    'font-family:"Courier New", monospace',
+    'font-size:9px',
+    'color:rgba(255,255,255,0.4)',
+    'display:none',
+  ].join(';');
+
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    triggerBackspaceLaser();
+  });
+
+  wrap.append(button, badge, timer, dpsLabel);
+  currentContext.uiLayer.appendChild(wrap);
+  backspaceUi = { wrap, button, icon, badge, timer, dpsLabel };
+}
+
+function updateBackspaceUi() {
+  if (!backspaceUi) return;
+
+  const hasCharges = commandState.backspaceCount > 0;
+  const active = commandState.laserFramesRemaining > 0;
+  const flashing = commandState.backspaceFlashFrames > 0;
+
+  backspaceUi.button.style.background = active
+    ? 'rgba(255,255,255,0.12)'
+    : hasCharges
+      ? 'rgba(255,255,255,0.05)'
+      : 'rgba(255,255,255,0.02)';
+  backspaceUi.button.style.borderColor = active
+    ? 'rgba(255,255,255,0.6)'
+    : hasCharges
+      ? 'rgba(255,255,255,0.2)'
+      : 'rgba(255,255,255,0.06)';
+  backspaceUi.button.style.cursor = hasCharges ? 'pointer' : 'default';
+  backspaceUi.icon.style.opacity = hasCharges ? '1' : '0.15';
+
+  backspaceUi.badge.style.display = hasCharges ? 'flex' : 'none';
+  if (hasCharges) {
+    backspaceUi.badge.textContent = commandState.backspaceCount > 9 ? '9+' : String(commandState.backspaceCount);
+  }
+
+  const ratio = Math.max(0, Math.min(1, commandState.laserFramesRemaining / LASER_DURATION_FRAMES));
+  backspaceUi.timer.style.display = active ? 'block' : 'none';
+  backspaceUi.timer.style.width = `${52 * ratio}px`;
+  backspaceUi.dpsLabel.style.display = active ? 'block' : 'none';
+  if (active) {
+    backspaceUi.dpsLabel.textContent = `[ ${getLaserDps().toFixed(1)} DPS ]`;
+  }
+
+  if (active) {
+    const pulse = 0.3 + ((Math.sin(Date.now() * 0.02) + 1) * 0.25);
+    backspaceUi.button.style.borderColor = `rgba(255,255,255,${pulse.toFixed(3)})`;
+  }
+
+  if (flashing) {
+    backspaceUi.button.style.background = 'rgba(255,255,255,0.3)';
+  }
+}
+
+function removeBackspaceUi() {
+  if (backspaceUi?.wrap?.parentElement) {
+    backspaceUi.wrap.parentElement.removeChild(backspaceUi.wrap);
+  }
+  backspaceUi = null;
+}
+
 // ─── Fighter AI helpers ───────────────────────────────────────────────────────
 function getNearestEnemyForFighter(fighter) {
   let nearest = null;
   let minDist = Infinity;
-  const candidates = commandState.bossPhase
-    ? (commandState.boss && commandState.boss.hp > 0 ? [commandState.boss] : [])
-    : commandState.enemies;
+  let candidates = [];
+
+  if (commandState.isMayhem) {
+    candidates = commandState.mayhemBosses.filter((boss) => boss.hp > 0);
+  } else {
+    candidates = commandState.bossPhase
+      ? (commandState.boss && commandState.boss.hp > 0 ? [commandState.boss] : [])
+      : commandState.enemies;
+  }
   for (const e of candidates) {
     if (!e || (e.hp !== undefined && e.hp <= 0)) continue;
     const dx = e.x - fighter.x;
@@ -284,14 +576,47 @@ function getNearestEnemyForFighter(fighter) {
 }
 
 function fireFighterBulletAt(fighter, now, vx, vy) {
-  if (now < fighter.nextShotAt) return;
+  if (!canSpawnFriendlyBullet()) return;
   commandState.fighterBullets.push({
     x: fighter.x,
     y: fighter.y - FIGHTER_HEIGHT / 2,
     vx,
     vy,
   });
-  fighter.nextShotAt = now + randomInRange(FIGHTER_FIRE_MIN_MS, FIGHTER_FIRE_MAX_MS);
+}
+
+function fireFleetVolley(now) {
+  if (now < commandState.nextFleetVolleyAt) {
+    return;
+  }
+
+  const alive = getAliveFighters();
+  if (alive.length === 0) {
+    return;
+  }
+
+  commandState.nextFleetVolleyAt = now + FLEET_VOLLEY_BASE_MS * commandState.fleetVolleyCooldownScale;
+
+  for (const fighter of alive) {
+    if (fighter.state === 'SHIELDING') {
+      continue;
+    }
+
+    const target = getNearestEnemyForFighter(fighter);
+    if (target && (fighter.state === 'ATTACKING' || fighter.state === 'FLANKING' || fighter.state === 'SCATTERED')) {
+      const dx = target.x - fighter.x;
+      const dy = target.y - fighter.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      fireFighterBulletAt(
+        fighter,
+        now,
+        (dx / dist) * FIGHTER_BULLET_SPEED,
+        (dy / dist) * FIGHTER_BULLET_SPEED,
+      );
+    } else {
+      fireFighterBulletAt(fighter, now, 0, -FIGHTER_BULLET_SPEED);
+    }
+  }
 }
 
 /** Move obj toward (tx,ty) at speed; returns true when arrived. */
@@ -316,12 +641,12 @@ function getShieldWallTarget(fighter) {
   return { tx, ty: commandState.y - 40 };
 }
 
-function updateFighterBullets(canvas) {
+function updateFighterBullets(canvas, dt) {
   const w = canvas.clientWidth || window.innerWidth;
   const h = canvas.clientHeight || window.innerHeight;
   for (const b of commandState.fighterBullets) {
-    b.x += b.vx;
-    b.y += b.vy;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
   }
   commandState.fighterBullets = commandState.fighterBullets.filter(
     (b) => b.y + FIGHTER_BULLET_HEIGHT >= 0 && b.x >= -20 && b.x <= w + 20 && b.y <= h + 20,
@@ -333,7 +658,9 @@ function updateFighters(canvas, now, dt) {
   const canvasWidth = canvas.clientWidth || window.innerWidth;
   const canvasHeight = canvas.clientHeight || window.innerHeight;
   const flankMargin = 32;
-  const allEnemiesGone = commandState.enemies.length === 0 && !commandState.bossPhase;
+  const allEnemiesGone = commandState.isMayhem
+    ? commandState.mayhemBosses.length === 0
+    : (commandState.enemies.length === 0 && !commandState.bossPhase);
 
   for (const f of commandState.fighters) {
     if (f.hp <= 0) continue;
@@ -355,7 +682,6 @@ function updateFighters(canvas, now, dt) {
         const target = getNearestEnemyForFighter(f);
         if (target) {
           moveToward(f, target.x, target.y - FIGHTER_HEIGHT, FIGHTER_ATTACK_SPEED, dt);
-          fireFighterBulletAt(f, now, 0, -FIGHTER_BULLET_SPEED);
           if (f.y < 20) {
             f.state = 'RETURNING';
           }
@@ -372,15 +698,6 @@ function updateFighters(canvas, now, dt) {
         } else {
           f.x = targetX;
           f.y -= FIGHTER_FLANK_SPEED * dt;
-          const target = getNearestEnemyForFighter(f);
-          if (target) {
-            const dx = target.x - f.x;
-            const dy = target.y - f.y;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            fireFighterBulletAt(f, now, (dx / dist) * FIGHTER_BULLET_SPEED, (dy / dist) * FIGHTER_BULLET_SPEED);
-          } else {
-            fireFighterBulletAt(f, now, 0, -FIGHTER_BULLET_SPEED);
-          }
         }
         if (f.y < -FIGHTER_HEIGHT) {
           f.state = 'RETURNING';
@@ -398,16 +715,7 @@ function updateFighters(canvas, now, dt) {
       }
 
       case 'SCATTERED': {
-        const arrived = moveToward(f, f.scatterX, f.scatterY, FIGHTER_SCATTER_SPEED, dt);
-        if (arrived) {
-          const target = getNearestEnemyForFighter(f);
-          if (target) {
-            const dx = target.x - f.x;
-            const dy = target.y - f.y;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            fireFighterBulletAt(f, now, (dx / dist) * FIGHTER_BULLET_SPEED, (dy / dist) * FIGHTER_BULLET_SPEED);
-          }
-        }
+        moveToward(f, f.scatterX, f.scatterY, FIGHTER_SCATTER_SPEED, dt);
         break;
       }
 
@@ -425,7 +733,8 @@ function updateFighters(canvas, now, dt) {
     }
   }
 
-  updateFighterBullets(canvas);
+  fireFleetVolley(now);
+  updateFighterBullets(canvas, dt);
 }
 
 // ─── Tactical orders ──────────────────────────────────────────────────────────
@@ -512,6 +821,7 @@ function issueOrder(orderKey) {
   }
 
   updateTacticalPanelButtons();
+  switchCtrlMode('control', true);
 }
 
 // ─── Mode-toggle UI ───────────────────────────────────────────────────────────
@@ -567,7 +877,7 @@ function createModeToggleButtons() {
   // Faint glow to remind player COMMAND mode exists
   btnCommand.style.boxShadow = '0 0 8px rgba(0,255,136,0.1)';
 
-  const onControl = (e) => { e.preventDefault(); switchCtrlMode('control'); };
+  const onControl = (e) => { e.preventDefault(); switchCtrlMode('control', true); };
   const onCommand = (e) => { e.preventDefault(); switchCtrlMode('command'); };
   btnControl.addEventListener('click', onControl);
   btnCommand.addEventListener('click', onCommand);
@@ -773,7 +1083,7 @@ function removeTacticalPanel() {
 }
 
 // ─── Switch between control / command mode ───────────────────────────────────
-function switchCtrlMode(mode) {
+function switchCtrlMode(mode, preserveState = false) {
   if (commandState.ctrlMode === mode) return;
   commandState.ctrlMode = mode;
   if (mode === 'command') {
@@ -781,11 +1091,13 @@ function switchCtrlMode(mode) {
     updateTacticalPanelButtons();
   } else {
     hideTacticalPanel();
-    // Recall all fighters to formation
-    for (const f of commandState.fighters) {
-      if (f.hp > 0 && f.state !== 'FORMATION') f.state = 'RETURNING';
+    if (!preserveState) {
+      // Recall all fighters to formation
+      for (const f of commandState.fighters) {
+        if (f.hp > 0 && f.state !== 'FORMATION') f.state = 'RETURNING';
+      }
+      commandState.activeOrder = null;
     }
-    commandState.activeOrder = null;
   }
   updateModeToggleButtons();
 }
@@ -863,8 +1175,47 @@ function killFighterByHit(fighter) {
 
 // ─── PowerUp ─────────────────────────────────────────────────────────────────
 function spawnCommandPowerUp(x, y) {
-  const pu = currentContext.spawnPowerup(x, y);
-  commandState.powerUps.push(pu);
+  const pu = currentContext.spawnDropPowerup?.(x, y, false);
+  if (pu) {
+    commandState.powerUps.push(pu);
+  }
+}
+
+function spawnBossPowerUp(x, y) {
+  const pu = currentContext.spawnDropPowerup?.(x, y, true);
+  if (pu) {
+    commandState.powerUps.push(pu);
+  }
+}
+
+function spawnMayhemWavePowerUp(x, y) {
+  const pool = commandState.mayhemActiveDropPool?.length
+    ? commandState.mayhemActiveDropPool
+    : MAYHEM_BASE_DROP_POOL;
+
+  if (!pool.includes(currentContext.BACKSPACE_TYPE)) {
+    spawnBossPowerUp(x, y);
+    return;
+  }
+
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+
+  let pu = null;
+  if (pick === currentContext.BACKSPACE_TYPE) {
+    pu = currentContext.spawnBackspace?.(x, y);
+  } else {
+    pu = {
+      x,
+      y,
+      radius: currentContext.POWERUP_RADIUS,
+      type: pick,
+      color: currentContext.POWERUP_COLORS?.[pick] ?? '#ffffff',
+    };
+  }
+
+  if (pu) {
+    commandState.powerUps.push(pu);
+  }
 }
 
 function updatePowerups(canvas, now, dt) {
@@ -896,7 +1247,14 @@ function updatePowerups(canvas, now, dt) {
 
   for (const pu of collected) {
     currentContext.audio?.playPowerup?.();
-    applyPowerup(pu.type, now);
+    if (pu.type === currentContext.BACKSPACE_TYPE) {
+      commandState.backspaceCount += 1;
+      commandState.activePowerupLabel = 'BACKSPACE STORED';
+      commandState.activePowerupLabelUntil = now + 1000;
+      commandState.activePowerupLabelColor = 'rgba(255,255,255,0.9)';
+    } else {
+      applyPowerup(pu.type, now);
+    }
   }
 }
 
@@ -905,38 +1263,14 @@ function applyPowerup(type, now) {
 
   commandState.activePowerupLabel = type.toUpperCase();
   commandState.activePowerupLabelUntil = now + 3000;
+  commandState.activePowerupLabelColor = 'rgba(255,255,255,0.7)';
 
   if (type === 'shield') {
     commandState.shieldActive = true;
   } else if (type === 'multi') {
     commandState.multiShotUntil = now + MULTI_SHOT_DURATION_MS;
   } else if (type === 'fleet') {
-    // Add 2 new fighters at the rear (max MAX_FLEET_COUNT)
-    const currentAlive = commandState.fighters.filter((f) => f.hp > 0).length;
-    const toAdd = Math.min(2, MAX_FLEET_COUNT - currentAlive);
-    if (toAdd > 0) {
-      let nextId = commandState.fighters.length + 1;
-      for (let i = 0; i < toAdd; i += 1) {
-        commandState.fighters.push({
-          id: `f${nextId += 1}`,
-          hp: 1,
-          x: commandState.x,
-          y: commandState.y + 80,
-          state: 'RETURNING',
-          row: 2,
-          col: 0,
-          totalInRow: 1,
-          nextShotAt: now + randomInRange(FIGHTER_FIRE_MIN_MS, FIGHTER_FIRE_MAX_MS),
-          flankSide: null,
-          scatterX: 0,
-          scatterY: 0,
-        });
-      }
-      // Update baseline for HP bar
-      commandState.fleetMaxCount = Math.max(commandState.fleetMaxCount,
-        commandState.fighters.filter((f) => f.hp > 0).length);
-      recalculateFormation();
-    }
+    addFighters(2, now);
   }
 }
 
@@ -946,14 +1280,31 @@ function syncHudState(now) {
   const bossActive = Boolean(commandState.bossPhase && commandState.boss && commandState.boss.hp > 0);
   commandState.fleetCount = commandState.fighters.filter((f) => f.hp > 0).length;
   currentContext.gameState.fleetCount = commandState.fleetCount;
+  currentContext.gameState.mode = commandState.isMayhem ? 'mayhem' : 'command';
   currentContext.gameState.powerups = {
     shield: commandState.shieldActive,
     multi: now < commandState.multiShotUntil,
     fleet: false,
   };
-  currentContext.gameState.bossActive = bossActive;
-  currentContext.gameState.bossHp = bossActive ? commandState.boss.hp : 0;
-  currentContext.gameState.bossMaxHp = bossActive ? commandState.boss.maxHp : 1;
+
+  if (commandState.isMayhem) {
+    const aliveBosses = commandState.mayhemBosses.filter((boss) => boss.hp > 0).length;
+    currentContext.gameState.bossActive = false;
+    currentContext.gameState.bossHp = 0;
+    currentContext.gameState.bossMaxHp = 1;
+    currentContext.gameState.mayhemWave = commandState.mayhemWave;
+    currentContext.gameState.mayhemBossRemaining = aliveBosses;
+    currentContext.gameState.mayhemBossTotal = Math.max(1, commandState.mayhemWaveBossTarget);
+    currentContext.gameState.backspaceRotationNoticeUntil = commandState.mayhemRotationNoticeUntil;
+  } else {
+    currentContext.gameState.bossActive = bossActive;
+    currentContext.gameState.bossHp = bossActive ? commandState.boss.hp : 0;
+    currentContext.gameState.bossMaxHp = bossActive ? commandState.boss.maxHp : 1;
+    currentContext.gameState.mayhemWave = 0;
+    currentContext.gameState.mayhemBossRemaining = 0;
+    currentContext.gameState.mayhemBossTotal = 0;
+    currentContext.gameState.backspaceRotationNoticeUntil = 0;
+  }
 }
 
 // ─── Boss ─────────────────────────────────────────────────────────────────────
@@ -1095,6 +1446,9 @@ function resolveBossCollisions() {
 
 function handleBossDeath(now) {
   currentContext.gameState.score += BOSS_SCORE;
+  if (commandState.boss) {
+    spawnBossPowerUp(commandState.boss.x, commandState.boss.y);
+  }
   currentContext.audio?.playBossDeath?.();
   commandState.bossBullets = [];
   commandState.boss = null;
@@ -1144,6 +1498,427 @@ function removeBossHpHud() {
   currentContext.gameState.bossActive = false;
   currentContext.gameState.bossHp = 0;
   currentContext.gameState.bossMaxHp = 1;
+}
+
+function ensureMayhemWaveBadge() {
+  if (!currentContext?.uiLayer) {
+    return null;
+  }
+
+  if (mayhemWaveBadgeEl && mayhemWaveBadgeEl.parentElement === currentContext.uiLayer) {
+    return mayhemWaveBadgeEl;
+  }
+
+  const badge = document.createElement('div');
+  badge.style.cssText = [
+    'position:absolute',
+    'left:50%',
+    'top:50%',
+    'transform:translate(-50%, -50%)',
+    'padding:14px 22px',
+    'border-radius:16px',
+    'background:rgba(255,40,20,0.06)',
+    'border:0.5px solid rgba(255,40,20,0.25)',
+    'backdrop-filter:blur(12px)',
+    '-webkit-backdrop-filter:blur(12px)',
+    'font-family:"Courier New", monospace',
+    'font-size:12px',
+    'letter-spacing:0.18em',
+    'color:rgba(255,140,120,0.95)',
+    'text-align:center',
+    'z-index:12',
+    'display:none',
+    'pointer-events:none',
+  ].join(';');
+  currentContext.uiLayer.appendChild(badge);
+  mayhemWaveBadgeEl = badge;
+  return mayhemWaveBadgeEl;
+}
+
+function showMayhemWaveBadge(text, durationMs = MAYHEM_WAVE_CLEAR_PAUSE_MS) {
+  const badge = ensureMayhemWaveBadge();
+  if (!badge) {
+    return;
+  }
+  badge.textContent = text;
+  badge.style.display = 'block';
+  window.setTimeout(() => {
+    if (badge) {
+      badge.style.display = 'none';
+    }
+  }, durationMs);
+}
+
+function clearMayhemWaveBadge() {
+  if (mayhemWaveBadgeEl) {
+    mayhemWaveBadgeEl.style.display = 'none';
+  }
+}
+
+function startMayhemWave(now) {
+  const pool = [...MAYHEM_BASE_DROP_POOL];
+  if (commandState.mayhemWave % 5 === 0) {
+    const swapIndex = Math.floor(Math.random() * pool.length);
+    pool[swapIndex] = currentContext.BACKSPACE_TYPE;
+    commandState.mayhemRotationNoticeUntil = now + 2000;
+  } else {
+    commandState.mayhemRotationNoticeUntil = 0;
+  }
+
+  commandState.mayhemActiveDropPool = pool;
+  commandState.mayhemWaveBossTarget = 14 + commandState.mayhemWave;
+  commandState.mayhemSpawnedThisWave = 0;
+  commandState.mayhemBosses = [];
+  commandState.bossBullets = [];
+  commandState.mayhemNextBossSpawnAt = now;
+  commandState.mayhemNextSyncVolleyAt = now + MAYHEM_SYNC_VOLLEY_MS;
+  commandState.mayhemSyncWarningUntil = 0;
+  commandState.mayhemAwaitingUpgrade = false;
+  commandState.nextFleetVolleyAt = now;
+  clearMayhemWaveBadge();
+}
+
+function removeMayhemUpgradeSelection() {
+  if (mayhemUpgradeEl?.parentElement) {
+    mayhemUpgradeEl.parentElement.removeChild(mayhemUpgradeEl);
+  }
+  mayhemUpgradeEl = null;
+}
+
+function addFighters(count, now) {
+  const currentAlive = getAliveFighters().length;
+  const toAdd = Math.min(count, getFleetCapacity() - currentAlive);
+  if (toAdd <= 0) {
+    return;
+  }
+
+  let nextId = commandState.fighters.length + 1;
+  for (let i = 0; i < toAdd; i += 1) {
+    commandState.fighters.push({
+      id: `f${nextId += 1}`,
+      hp: 1,
+      x: commandState.x,
+      y: commandState.y + 90,
+      state: 'RETURNING',
+      row: 0,
+      col: 0,
+      totalInRow: 1,
+      nextShotAt: now,
+      flankSide: null,
+      scatterX: 0,
+      scatterY: 0,
+    });
+  }
+  commandState.fleetMaxCount = Math.max(commandState.fleetMaxCount, getAliveFighters().length);
+  recalculateFormation();
+}
+
+function showMayhemUpgradeSelection(now) {
+  if (!currentContext?.uiLayer) {
+    return;
+  }
+  removeMayhemUpgradeSelection();
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = [
+    'position:absolute',
+    'left:50%',
+    'top:50%',
+    'transform:translate(-50%, -50%)',
+    'z-index:18',
+    'display:flex',
+    'flex-direction:column',
+    'gap:10px',
+    'padding:14px',
+    'border-radius:16px',
+    'background:rgba(0,0,0,0.72)',
+    'border:0.5px solid rgba(255,255,255,0.12)',
+    'backdrop-filter:blur(14px)',
+    '-webkit-backdrop-filter:blur(14px)',
+    'font-family:"Courier New", monospace',
+    'text-align:center',
+    'min-width:300px',
+    'pointer-events:auto',
+  ].join(';');
+
+  const title = document.createElement('div');
+  title.textContent = 'CHOOSE MAYHEM UPGRADE';
+  title.style.cssText = 'font-size:11px;letter-spacing:0.2em;color:rgba(255,255,255,0.7);';
+
+  const makeBtn = (text) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = text;
+    btn.style.cssText = [
+      'padding:12px 14px',
+      'border-radius:12px',
+      'border:0.5px solid rgba(0,255,136,0.3)',
+      'background:rgba(0,255,136,0.07)',
+      'color:#00ff88',
+      'font-family:"Courier New", monospace',
+      'font-size:11px',
+      'letter-spacing:0.14em',
+      'cursor:pointer',
+    ].join(';');
+    return btn;
+  };
+
+  const groupShield = makeBtn('GROUP SHIELD');
+  const replenish = makeBtn('REPLENISH FIGHTERS +20');
+  const cooldown = makeBtn('LOWER COOLDOWN -10%');
+
+  const applyChoice = (choice) => {
+    if (choice === 'shield') {
+      commandState.groupShieldHp = GROUP_SHIELD_MAX_HP;
+    } else if (choice === 'replenish') {
+      addFighters(20, now);
+    } else if (choice === 'cooldown') {
+      commandState.fleetVolleyCooldownScale = Math.max(0.2, commandState.fleetVolleyCooldownScale * 0.9);
+    }
+
+    removeMayhemUpgradeSelection();
+    commandState.mayhemAwaitingUpgrade = false;
+    commandState.mayhemWave += 1;
+    currentContext.gameState.wave = commandState.mayhemWave;
+    startMayhemWave(performance.now());
+  };
+
+  groupShield.addEventListener('click', () => applyChoice('shield'));
+  replenish.addEventListener('click', () => applyChoice('replenish'));
+  cooldown.addEventListener('click', () => applyChoice('cooldown'));
+
+  wrap.append(title, groupShield, replenish, cooldown);
+  currentContext.uiLayer.appendChild(wrap);
+  mayhemUpgradeEl = wrap;
+}
+
+function absorbByGroupShield(x, y) {
+  if (commandState.groupShieldHp <= 0) {
+    return false;
+  }
+  const dx = x - commandState.x;
+  const dy = y - commandState.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist > GROUP_SHIELD_RADIUS) {
+    return false;
+  }
+  commandState.groupShieldHp = Math.max(0, commandState.groupShieldHp - 1);
+  return true;
+}
+
+function spawnMayhemBoss(canvas, now) {
+  if (commandState.mayhemSpawnedThisWave >= commandState.mayhemWaveBossTarget) {
+    return;
+  }
+
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  const upperZone = height * 0.4;
+  const rows = 3;
+  const cols = Math.max(1, Math.ceil(commandState.mayhemWaveBossTarget / rows));
+  const idx = commandState.mayhemSpawnedThisWave;
+  const row = idx % rows;
+  const col = Math.floor(idx / rows) % cols;
+  const rowBand = upperZone / (rows + 1);
+  const yTarget = 30 + rowBand * (row + 1);
+  const cellWidth = width / (cols + 1);
+  const patrolCenterX = cellWidth * (col + 1);
+
+  commandState.mayhemBosses.push({
+    id: `mb-${commandState.mayhemWave}-${idx}-${Math.floor(now)}`,
+    hp: MAYHEM_BOSS_HP,
+    maxHp: MAYHEM_BOSS_HP,
+    x: randomInRange(40, width - 40),
+    y: -90,
+    patrolCenterX,
+    patrolMinX: Math.max(40, patrolCenterX - 80),
+    patrolMaxX: Math.min(width - 40, patrolCenterX + 80),
+    targetY: yTarget,
+    direction: Math.random() < 0.5 ? -1 : 1,
+    entered: false,
+    droppedOnDeath: false,
+    phaseOffset: Math.random() * Math.PI * 2,
+    nextShotAt: now + randomInRange(MAYHEM_BOSS_BURST_MS * 0.5, MAYHEM_BOSS_BURST_MS),
+  });
+
+  commandState.mayhemSpawnedThisWave += 1;
+  commandState.mayhemNextBossSpawnAt = now + MAYHEM_BOSS_SPAWN_MS;
+}
+
+function fireMayhemBossBurst(boss, forceSync = false) {
+  if (commandState.bossBullets.length >= MAYHEM_GLOBAL_BULLET_CAP) {
+    return;
+  }
+
+  const spread = 0.16;
+  const speed = BOSS_BULLET_SPEED;
+  for (let i = -1; i <= 1; i += 2) {
+    if (commandState.bossBullets.length >= MAYHEM_GLOBAL_BULLET_CAP) {
+      break;
+    }
+    const angle = i * spread;
+    commandState.bossBullets.push({
+      x: boss.x,
+      y: boss.y + MAYHEM_BOSS_HEIGHT / 2,
+      vx: Math.sin(angle) * speed,
+      vy: Math.cos(angle) * speed,
+      mayhemSync: forceSync,
+    });
+  }
+}
+
+function updateMayhemBosses(canvas, now, dt) {
+  if (commandState.mayhemSpawnedThisWave < commandState.mayhemWaveBossTarget && now >= commandState.mayhemNextBossSpawnAt) {
+    spawnMayhemBoss(canvas, now);
+  }
+
+  if (now >= commandState.mayhemNextSyncVolleyAt - 1000 && commandState.mayhemSyncWarningUntil < commandState.mayhemNextSyncVolleyAt) {
+    commandState.mayhemSyncWarningUntil = commandState.mayhemNextSyncVolleyAt;
+  }
+
+  if (now >= commandState.mayhemNextSyncVolleyAt) {
+    for (const boss of commandState.mayhemBosses) {
+      if (boss.hp > 0 && boss.entered) {
+        fireMayhemBossBurst(boss, true);
+      }
+    }
+    commandState.mayhemNextSyncVolleyAt = now + MAYHEM_SYNC_VOLLEY_MS;
+    commandState.mayhemSyncWarningUntil = 0;
+  }
+
+  for (const boss of commandState.mayhemBosses) {
+    if (boss.hp <= 0) continue;
+
+    if (!boss.entered) {
+      boss.y += 1.8 * dt;
+      boss.x += (boss.patrolCenterX - boss.x) * 0.04 * dt;
+      if (boss.y >= boss.targetY) {
+        boss.y = boss.targetY;
+        boss.entered = true;
+      }
+      continue;
+    }
+
+    boss.x += boss.direction * 0.55 * dt;
+    if (boss.x <= boss.patrolMinX) {
+      boss.x = boss.patrolMinX;
+      boss.direction = 1;
+    }
+    if (boss.x >= boss.patrolMaxX) {
+      boss.x = boss.patrolMaxX;
+      boss.direction = -1;
+    }
+
+    if (now >= boss.nextShotAt) {
+      fireMayhemBossBurst(boss, false);
+      boss.nextShotAt = now + MAYHEM_BOSS_BURST_MS;
+    }
+  }
+
+  updateBossBullets(canvas, dt);
+}
+
+function resolveMayhemCollisions(now) {
+  const usedPlayerBullets = new Set();
+  const usedFighterBullets = new Set();
+
+  for (let i = 0; i < commandState.playerBullets.length; i += 1) {
+    const b = commandState.playerBullets[i];
+    const bBox = getAabb(b.x, b.y, PLAYER_BULLET_WIDTH, PLAYER_BULLET_HEIGHT);
+    for (const boss of commandState.mayhemBosses) {
+      if (boss.hp <= 0) continue;
+      const bossBox = getAabb(boss.x, boss.y, MAYHEM_BOSS_WIDTH, MAYHEM_BOSS_HEIGHT);
+      if (!overlapsAabb(bBox, bossBox)) continue;
+      usedPlayerBullets.add(i);
+      boss.hp -= 1;
+      if (boss.hp <= 0) {
+        currentContext.gameState.score += MAYHEM_BOSS_SCORE * MAYHEM_SCORE_MULTIPLIER;
+        commandState.mayhemTotalBossesDefeated += 1;
+        if (!boss.droppedOnDeath) {
+          spawnMayhemWavePowerUp(boss.x, boss.y);
+          boss.droppedOnDeath = true;
+        }
+        currentContext.audio?.playBossDeath?.();
+      }
+      break;
+    }
+  }
+
+  for (let i = 0; i < commandState.fighterBullets.length; i += 1) {
+    const b = commandState.fighterBullets[i];
+    const bBox = getAabb(b.x, b.y, FIGHTER_BULLET_WIDTH, FIGHTER_BULLET_HEIGHT);
+    for (const boss of commandState.mayhemBosses) {
+      if (boss.hp <= 0) continue;
+      const bossBox = getAabb(boss.x, boss.y, MAYHEM_BOSS_WIDTH, MAYHEM_BOSS_HEIGHT);
+      if (!overlapsAabb(bBox, bossBox)) continue;
+      usedFighterBullets.add(i);
+      boss.hp -= 1;
+      if (boss.hp <= 0) {
+        currentContext.gameState.score += MAYHEM_BOSS_SCORE * MAYHEM_SCORE_MULTIPLIER;
+        commandState.mayhemTotalBossesDefeated += 1;
+        if (!boss.droppedOnDeath) {
+          spawnMayhemWavePowerUp(boss.x, boss.y);
+          boss.droppedOnDeath = true;
+        }
+        currentContext.audio?.playBossDeath?.();
+      }
+      break;
+    }
+  }
+
+  commandState.playerBullets = commandState.playerBullets.filter((_, i) => !usedPlayerBullets.has(i));
+  commandState.fighterBullets = commandState.fighterBullets.filter((_, i) => !usedFighterBullets.has(i));
+  commandState.mayhemBosses = commandState.mayhemBosses.filter((boss) => boss.hp > 0);
+
+  const motherBox = getCircleAabb(commandState.x, commandState.y, SHIP_RADIUS);
+  commandState.bossBullets = commandState.bossBullets.filter((b) => {
+    const bBox = getAabb(b.x, b.y, BOSS_BULLET_WIDTH, BOSS_BULLET_HEIGHT);
+
+    if (absorbByGroupShield(b.x, b.y)) {
+      return false;
+    }
+
+    for (const f of commandState.fighters) {
+      if (!f || f.hp <= 0) continue;
+      const fBox = getAabb(f.x, f.y, FIGHTER_WIDTH, FIGHTER_HEIGHT);
+      if (overlapsAabb(bBox, fBox)) {
+        killFighterByHit(f);
+        return false;
+      }
+    }
+    if (overlapsAabb(bBox, motherBox)) {
+      loseCommandLife();
+      return false;
+    }
+    return true;
+  });
+
+  const waveDone =
+    commandState.mayhemSpawnedThisWave >= commandState.mayhemWaveBossTarget
+    && commandState.mayhemBosses.length === 0
+    && !commandState.mayhemAwaitingUpgrade;
+
+  if (waveDone) {
+    commandState.mayhemWavesCleared += 1;
+    showMayhemWaveBadge(
+      `MAYHEM WAVE ${commandState.mayhemWave} CLEARED - ${commandState.mayhemWaveBossTarget} BOSSES DEFEATED`,
+      MAYHEM_WAVE_CLEAR_PAUSE_MS,
+    );
+    commandState.mayhemAwaitingUpgrade = true;
+    commandState.bossBullets = [];
+    showMayhemUpgradeSelection(now);
+  }
+}
+
+function getBestMayhemScore() {
+  const raw = Number(localStorage.getItem(MAYHEM_SCORE_KEY));
+  return Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+}
+
+function saveBestMayhemScore(score) {
+  const best = Math.max(getBestMayhemScore(), Math.max(0, score));
+  localStorage.setItem(MAYHEM_SCORE_KEY, String(best));
+  return best;
 }
 
 // ─── Touch controls ───────────────────────────────────────────────────────────
@@ -1290,6 +2065,10 @@ function handleKeyChange(event, isDown) {
   if (key === 'arrowup' || key === 'w') commandState.input.up = isDown;
   if (key === 'arrowdown' || key === 's') commandState.input.down = isDown;
   if (key === ' ' || key === 'spacebar') commandState.input.fire = isDown;
+  if (key === 'backspace' && isDown) {
+    event.preventDefault();
+    triggerBackspaceLaser();
+  }
 }
 
 // ─── Player movement ──────────────────────────────────────────────────────────
@@ -1378,20 +2157,6 @@ function updatePlayerShooting(now) {
       { x: originX, y: originY, vx: -Math.sin(PLAYER_SPREAD_ANGLE) * PLAYER_BULLET_SPEED, vy: -Math.cos(PLAYER_SPREAD_ANGLE) * PLAYER_BULLET_SPEED },
       { x: originX, y: originY, vx: Math.sin(PLAYER_SPREAD_ANGLE) * PLAYER_BULLET_SPEED, vy: -Math.cos(PLAYER_SPREAD_ANGLE) * PLAYER_BULLET_SPEED },
     );
-  }
-
-  // In CONTROL mode: front-row fighters fire upward too
-  if (commandState.ctrlMode === 'control') {
-    for (const f of commandState.fighters) {
-      if (f.hp > 0 && f.row === 0 && f.state === 'FORMATION') {
-        commandState.fighterBullets.push({
-          x: f.x,
-          y: f.y - FIGHTER_HEIGHT / 2,
-          vx: 0,
-          vy: -FIGHTER_BULLET_SPEED,
-        });
-      }
-    }
   }
 
   currentContext.audio?.play?.('shoot');
@@ -1518,12 +2283,22 @@ function loseCommandLife() {
   updateLivesHud();
 
   if (currentContext.gameState.lives <= 0) {
+    const mayhemBest = commandState.isMayhem
+      ? saveBestMayhemScore(currentContext.gameState.score)
+      : undefined;
     syncHudState(performance.now());
     currentContext.hud?.updateHUD?.(currentContext.gameState);
     currentContext.hud?.showGameOver?.({
       mode: currentContext.gameState.mode,
       score: currentContext.gameState.score,
       wave: currentContext.gameState.wave,
+      mayhem: commandState.isMayhem
+        ? {
+          wavesCleared: commandState.mayhemWavesCleared,
+          totalBossesDefeated: commandState.mayhemTotalBossesDefeated,
+          bestScore: mayhemBest,
+        }
+        : null,
     });
     currentContext.gameState.running = false;
   }
@@ -1548,9 +2323,7 @@ function resolveCollisions() {
         killedEnemyIds.add(enemy.id);
         gameState.score += SCORE_PER_KILL;
         currentContext.audio?.play?.('enemyDeath');
-        if (Math.random() < POWERUP_DROP_CHANCE) {
-          spawnCommandPowerUp(enemy.x, enemy.y);
-        }
+        spawnCommandPowerUp(enemy.x, enemy.y);
       }
       break;
     }
@@ -1571,9 +2344,7 @@ function resolveCollisions() {
         killedEnemyIds.add(enemy.id);
         gameState.score += SCORE_PER_KILL;
         currentContext.audio?.play?.('enemyDeath');
-        if (Math.random() < POWERUP_DROP_CHANCE) {
-          spawnCommandPowerUp(enemy.x, enemy.y);
-        }
+        spawnCommandPowerUp(enemy.x, enemy.y);
       }
       break;
     }
@@ -1656,6 +2427,27 @@ function renderCommand(ctx) {
   drawCircle(ctx, commandState.x, commandState.y, SHIP_RADIUS, shipColor, SHIP_GLOW);
   ctx.lineWidth = previousLineWidth;
 
+  if (commandState.groupShieldHp > 0) {
+    const ratio = Math.max(0, commandState.groupShieldHp / GROUP_SHIELD_MAX_HP);
+    ctx.beginPath();
+    ctx.arc(commandState.x, commandState.y, GROUP_SHIELD_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0,238,255,0.28)';
+    ctx.shadowColor = '#00eeff';
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 1;
+
+    const barW = 92;
+    const barX = commandState.x - barW / 2;
+    const barY = commandState.y + GROUP_SHIELD_RADIUS + 10;
+    ctx.fillStyle = 'rgba(0,238,255,0.15)';
+    ctx.fillRect(barX, barY, barW, 3);
+    ctx.fillStyle = 'rgba(0,238,255,0.85)';
+    ctx.fillRect(barX, barY, barW * ratio, 3);
+  }
+
   // Fleet HP bar above mothership
   const aliveCount = commandState.fighters.filter((f) => f.hp > 0).length;
   const barRatio = commandState.fleetMaxCount > 0 ? aliveCount / commandState.fleetMaxCount : 0;
@@ -1699,11 +2491,46 @@ function renderCommand(ctx) {
 
   // Powerups
   for (const pu of commandState.powerUps) {
-    drawCircle(ctx, pu.x, pu.y, pu.radius, pu.color, 14);
+    if (pu.type === currentContext.BACKSPACE_TYPE) {
+      drawCircle(ctx, pu.x, pu.y, pu.radius, '#ffffff', 16);
+      ctx.beginPath();
+      ctx.moveTo(pu.x + 3, pu.y);
+      ctx.lineTo(pu.x - 3, pu.y);
+      ctx.lineTo(pu.x - 1, pu.y - 2);
+      ctx.moveTo(pu.x - 3, pu.y);
+      ctx.lineTo(pu.x - 1, pu.y + 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      drawCircle(ctx, pu.x, pu.y, pu.radius, pu.color, 14);
+    }
   }
 
-  // Boss
-  if (commandState.boss && commandState.boss.hp > 0) {
+  // Boss / mayhem bosses
+  if (commandState.isMayhem) {
+    const syncWarning = commandState.mayhemSyncWarningUntil > Date.now();
+    for (const boss of commandState.mayhemBosses) {
+      if (boss.hp <= 0) continue;
+      if (
+        boss.y < -MAYHEM_BOSS_HEIGHT
+        || boss.x < -MAYHEM_BOSS_WIDTH
+        || boss.x > width + MAYHEM_BOSS_WIDTH
+      ) {
+        continue;
+      }
+
+      let pulseGlow = Math.sin(Date.now() * 0.004 + boss.phaseOffset) * 8 + (isTouchDevice ? 18 : 22);
+      if (syncWarning) {
+        pulseGlow = 50;
+      }
+
+      const prevLW = ctx.lineWidth;
+      ctx.lineWidth = BOSS_STROKE_WIDTH;
+      drawTriangle(ctx, boss.x, boss.y, MAYHEM_BOSS_WIDTH, MAYHEM_BOSS_HEIGHT, 'down', BOSS_COLOR, pulseGlow);
+      ctx.lineWidth = prevLW;
+    }
+  } else if (commandState.boss && commandState.boss.hp > 0) {
     const boss = commandState.boss;
     const pulseGlow = Math.sin(Date.now() * 0.004) * 12 + 22;
     const bossColor = boss.flashFrames > 0 ? '#ffffff' : BOSS_COLOR;
@@ -1735,13 +2562,46 @@ function renderCommand(ctx) {
   const pnow = performance.now();
   if (commandState.activePowerupLabel && pnow < commandState.activePowerupLabelUntil) {
     ctx.font = '10px "Courier New", monospace';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    ctx.fillStyle = commandState.activePowerupLabelColor || 'rgba(255, 255, 255, 0.7)';
     ctx.textAlign = 'center';
     ctx.fillText(commandState.activePowerupLabel, commandState.x, commandState.y - SHIP_RADIUS - 16);
     ctx.textAlign = 'start';
   } else {
     commandState.activePowerupLabel = null;
   }
+
+  if (commandState.laserFramesRemaining > 0) {
+    const laserX = commandState.x;
+    const originY = commandState.y - SHIP_RADIUS;
+    ctx.beginPath();
+    ctx.moveTo(laserX, originY);
+    ctx.lineTo(laserX, 0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(laserX, originY);
+    ctx.lineTo(laserX, 0);
+    ctx.strokeStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 28;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 1;
+  }
+}
+
+function clearArenaForUnlock() {
+  commandState.enemies = [];
+  commandState.enemyBullets = [];
+  commandState.playerBullets = [];
+  commandState.fighterBullets = [];
+  commandState.powerUps = [];
+  commandState.bossBullets = [];
+  commandState.boss = null;
+  commandState.bossPhase = false;
 }
 
 // ─── Game loop ────────────────────────────────────────────────────────────────
@@ -1749,7 +2609,7 @@ function gameLoop() {
   if (
     !currentContext ||
     !currentContext.gameState.running ||
-    currentContext.gameState.mode !== 'command'
+    (currentContext.gameState.mode !== 'command' && currentContext.gameState.mode !== 'mayhem')
   ) {
     return;
   }
@@ -1759,34 +2619,56 @@ function gameLoop() {
   lastFrameTime = now;
 
   if (!currentContext.gameState.paused) {
-    const waveEvent = currentContext.waveController.update(now);
-    if (waveEvent.action === 'spawn-boss') {
-      spawnBoss(currentContext.canvas);
-    } else if (waveEvent.action === 'spawn-formation') {
-      spawnFormationForWave();
-    }
-
-    if (currentContext.waveController.isCombatPhase()) {
+    if (commandState.isMayhem) {
       updatePlayer(currentContext.canvas, dt, now);
       updatePlayerShooting(now);
       updatePlayerBullets(dt);
       updateFighters(currentContext.canvas, now, dt);
-
-      if (commandState.bossPhase) {
-        updateBoss(currentContext.canvas, now, dt);
-        updateBossBullets(currentContext.canvas, dt);
-        resolveBossCollisions();
-      } else {
-        updateEnemyFormation(currentContext.canvas, now, dt);
-        updateEnemyBullets(currentContext.canvas, now, dt);
-        resolveCollisions();
+      if (!commandState.mayhemAwaitingUpgrade) {
+        updateMayhemBosses(currentContext.canvas, now, dt);
+        resolveMayhemCollisions(now);
+      }
+      updatePowerups(currentContext.canvas, now, dt);
+      applyBackspaceLaser(dt);
+    } else {
+      const waveEvent = currentContext.waveController.update(now);
+      if (waveEvent.action === 'unlock-mayhem') {
+        clearArenaForUnlock();
+        currentContext.hud?.hideHUD?.();
+        currentContext.onWave100Unlock?.();
+        return;
       }
 
-      updatePowerups(currentContext.canvas, now, dt);
-      checkWaveTransition(now);
+      if (waveEvent.action === 'spawn-boss') {
+        spawnBoss(currentContext.canvas);
+      } else if (waveEvent.action === 'spawn-formation') {
+        spawnFormationForWave();
+      }
+
+      if (currentContext.waveController.isCombatPhase()) {
+        updatePlayer(currentContext.canvas, dt, now);
+        updatePlayerShooting(now);
+        updatePlayerBullets(dt);
+        updateFighters(currentContext.canvas, now, dt);
+
+        if (commandState.bossPhase) {
+          updateBoss(currentContext.canvas, now, dt);
+          updateBossBullets(currentContext.canvas, dt);
+          resolveBossCollisions();
+        } else {
+          updateEnemyFormation(currentContext.canvas, now, dt);
+          updateEnemyBullets(currentContext.canvas, now, dt);
+          resolveCollisions();
+        }
+
+        updatePowerups(currentContext.canvas, now, dt);
+        applyBackspaceLaser(dt);
+        checkWaveTransition(now);
+      }
     }
 
     touchControls?.update?.();
+    updateBackspaceUi();
 
     // Keep tactical panel status line fresh
     if (commandState.ctrlMode === 'command') {
@@ -1800,6 +2682,9 @@ function gameLoop() {
 
     if (commandState.playerFlashFrames > 0) {
       commandState.playerFlashFrames -= 1;
+    }
+    if (commandState.backspaceFlashFrames > 0) {
+      commandState.backspaceFlashFrames -= 1;
     }
   }
 
@@ -1816,25 +2701,30 @@ export function startCommand(context = currentContext) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  const isMayhemVariant = context.variant === 'mayhem';
   currentContext = { ...context, ctx, loseLife: loseCommandLife };
   syncCanvasResolution(canvas, ctx);
 
-  const fighters = initializeFighters();
+  const initialFleetCount = isMayhemVariant ? MAYHEM_STARTING_FLEET_COUNT : STARTING_FLEET_COUNT;
+  const fighters = initializeFighters(initialFleetCount);
   const cx = (canvas.clientWidth || window.innerWidth) / 2;
   const cy = (canvas.clientHeight || window.innerHeight) - 82;
+  const now = performance.now();
 
   // Snap fighters to initial formation positions
-  const counts = getRowCounts(STARTING_FLEET_COUNT);
+  commandState.isMayhem = isMayhemVariant;
+  const counts = getRowCounts(initialFleetCount);
   let idx = 0;
-  for (let row = 0; row < 3; row += 1) {
+  for (let row = 0; row < counts.length; row += 1) {
     for (let col = 0; col < counts[row]; col += 1) {
       const f = fighters[idx];
       if (!f) break;
       const spacing = 24;
       const totalWidth = Math.max(0, (counts[row] - 1)) * spacing;
       const dx = -totalWidth / 2 + col * spacing;
+      const rows = getFleetRowOffsets();
       f.x = cx + dx;
-      f.y = cy + (FLEET_ROW_Y[row] || 0);
+      f.y = cy + (rows[row] || 0);
       idx += 1;
     }
   }
@@ -1846,8 +2736,9 @@ export function startCommand(context = currentContext) {
     velocityY: 0,
     fighters,
     fighterBullets: [],
-    fleetCount: STARTING_FLEET_COUNT,
-    fleetMaxCount: STARTING_FLEET_COUNT,
+    fleetCount: initialFleetCount,
+    fleetMaxCount: initialFleetCount,
+    isMayhem: isMayhemVariant,
     ctrlMode: 'control',
     activeOrder: null,
     hoverOffset: 0,
@@ -1859,6 +2750,7 @@ export function startCommand(context = currentContext) {
     multiShotUntil: 0,
     activePowerupLabel: null,
     activePowerupLabelUntil: 0,
+    activePowerupLabelColor: 'rgba(255,255,255,0.7)',
     powerUps: [],
     enemyFormationOffsetX: 0,
     enemyFormationDirection: 1,
@@ -1869,22 +2761,45 @@ export function startCommand(context = currentContext) {
     boss: null,
     bossPhase: false,
     bossBullets: [],
+    mayhemWave: 1,
+    mayhemBosses: [],
+    mayhemSpawnedThisWave: 0,
+    mayhemWaveBossTarget: 0,
+    mayhemNextBossSpawnAt: 0,
+    mayhemNextSyncVolleyAt: 0,
+    mayhemSyncWarningUntil: 0,
+    mayhemTotalBossesDefeated: 0,
+    mayhemWavesCleared: 0,
+    mayhemWaveResumeAt: 0,
+    mayhemAwaitingUpgrade: false,
+    mayhemActiveDropPool: [...MAYHEM_BASE_DROP_POOL],
+    mayhemRotationNoticeUntil: 0,
+    nextFleetVolleyAt: now,
+    fleetVolleyCooldownScale: 1,
+    groupShieldHp: 0,
+    backspaceCount: 0,
+    laserFramesRemaining: 0,
+    backspaceFlashFrames: 0,
     input: {
       left: false, right: false, up: false, down: false, fire: false, axisX: 0, axisY: 0,
     },
   };
 
-  for (const enemy of commandState.enemies) {
-    const home = getEnemyHomePosition(enemy, canvas);
-    enemy.x = home.x;
-    enemy.y = home.y;
+  if (!isMayhemVariant) {
+    for (const enemy of commandState.enemies) {
+      const home = getEnemyHomePosition(enemy, canvas);
+      enemy.x = home.x;
+      enemy.y = home.y;
+    }
+    scheduleNextDive(now);
+    scheduleNextEnemyShot(now);
+  } else {
+    commandState.enemies = [];
+    commandState.enemyBullets = [];
+    startMayhemWave(now);
   }
 
-  const now = performance.now();
-  scheduleNextDive(now);
-  scheduleNextEnemyShot(now);
-
-  currentContext.gameState.mode = 'command';
+  currentContext.gameState.mode = isMayhemVariant ? 'mayhem' : 'command';
   currentContext.gameState.score = 0;
   currentContext.gameState.wave = 1;
   currentContext.gameState.running = true;
@@ -1896,6 +2811,7 @@ export function startCommand(context = currentContext) {
   lastFrameTime = 0;
 
   setupTouchControls();
+  createBackspaceUi();
   createModeToggleButtons();
   createTacticalPanel();
   updateModeToggleButtons();
@@ -2033,10 +2949,17 @@ export function stopCommand() {
   removeBossHpHud();
   currentContext?.hud?.hidePauseMenu?.();
   removeTouchControls();
+  removeBackspaceUi();
   removeModeToggleButtons();
   removeTacticalPanel();
+  clearMayhemWaveBadge();
+  removeMayhemUpgradeSelection();
 
   if (currentContext?.gameState?.mode === 'command') {
+    currentContext.gameState.running = false;
+  }
+
+  if (currentContext?.gameState?.mode === 'mayhem') {
     currentContext.gameState.running = false;
   }
 }
