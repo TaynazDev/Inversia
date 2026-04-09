@@ -4,6 +4,7 @@ const MENU_STYLE_ID = 'inversia-menu-style';
 const GAME_OVER_STYLE_ID = 'inversia-game-over-style';
 const PREF_SHOW_LEADERBOARD = 'inversia_pref_show_leaderboard';
 const PREF_MASTER_VOLUME = 'inversia_pref_master_volume';
+const MAYHEM_UNLOCK_KEY = 'inversia_mayhem_unlocked';
 
 function ensureMenuStyles() {
   if (document.getElementById(MENU_STYLE_ID)) {
@@ -78,6 +79,33 @@ function ensureMenuStyles() {
       border-color: rgba(0, 255, 120, 0.25);
     }
 
+    .inversia-card-mayhem {
+      background: rgba(255, 40, 20, 0.06);
+      border: 0.5px solid rgba(255, 40, 20, 0.25);
+      min-height: 180px;
+      animation: inversia-mayhem-card-in 260ms ease;
+    }
+
+    .inversia-card-mayhem:hover {
+      background: rgba(255, 50, 34, 0.1);
+      border-color: rgba(255, 50, 34, 0.45);
+    }
+
+    .inversia-mayhem-icon {
+      filter: drop-shadow(0 0 14px rgba(255, 50, 34, 0.45));
+      animation: inversia-mayhem-pulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes inversia-mayhem-card-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes inversia-mayhem-pulse {
+      0%, 100% { filter: drop-shadow(0 0 10px rgba(255, 50, 34, 0.35)); }
+      50% { filter: drop-shadow(0 0 22px rgba(255, 50, 34, 0.65)); }
+    }
+
     .inversia-card-title {
       margin: 0;
       font-size: 1.1rem;
@@ -131,6 +159,10 @@ function ensureMenuStyles() {
       .inversia-cards {
         grid-template-columns: 1fr;
         width: min(280px, calc(100vw - 32px));
+      }
+
+      .inversia-card-mayhem {
+        min-height: 198px;
       }
     }
   `;
@@ -396,6 +428,20 @@ export function createHUD(uiLayer) {
       minWidth: '120px',
     });
 
+    const mayhemRotationPill = createPanel({
+      position: 'absolute',
+      top: '54px',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      padding: '5px 10px',
+      borderRadius: '999px',
+      fontSize: '9px',
+      letterSpacing: '0.15em',
+      color: 'rgba(255,255,255,0.35)',
+      display: 'none',
+    });
+    mayhemRotationPill.textContent = '⟳ BACKSPACE IN ROTATION';
+
     const leaderboardPanel = createPanel({
       position: 'absolute',
       right: '16px',
@@ -481,6 +527,41 @@ export function createHUD(uiLayer) {
     bossFill.style.boxShadow = '0 0 10px rgba(255,70,50,0.35)';
     bossPanel.appendChild(bossFill);
 
+    const mayhemBossPanel = createPanel({
+      position: 'absolute',
+      right: '16px',
+      top: '74px',
+      width: '230px',
+      padding: '12px',
+      background: 'rgba(255,40,20,0.06)',
+      borderColor: 'rgba(255,40,20,0.28)',
+      display: 'none',
+      lineHeight: '1.6',
+    });
+
+    const mayhemBossTitle = document.createElement('div');
+    mayhemBossTitle.textContent = 'BOSSES REMAINING';
+    mayhemBossTitle.style.color = 'rgba(255,140,120,0.85)';
+    mayhemBossTitle.style.marginBottom = '6px';
+
+    const mayhemBossCount = document.createElement('div');
+    mayhemBossCount.style.color = 'rgba(255,255,255,0.92)';
+    mayhemBossCount.style.marginBottom = '8px';
+
+    const mayhemBossTrack = document.createElement('div');
+    mayhemBossTrack.style.height = '8px';
+    mayhemBossTrack.style.borderRadius = '8px';
+    mayhemBossTrack.style.background = 'rgba(255,60,40,0.15)';
+
+    const mayhemBossFill = document.createElement('div');
+    mayhemBossFill.style.height = '8px';
+    mayhemBossFill.style.borderRadius = '8px';
+    mayhemBossFill.style.background = 'rgba(255,70,50,0.9)';
+    mayhemBossFill.style.boxShadow = '0 0 12px rgba(255,70,50,0.45)';
+    mayhemBossFill.style.width = '100%';
+    mayhemBossTrack.appendChild(mayhemBossFill);
+    mayhemBossPanel.append(mayhemBossTitle, mayhemBossCount, mayhemBossTrack);
+
     const modeBadge = createPanel({
       position: 'absolute',
       left: '16px',
@@ -494,10 +575,12 @@ export function createHUD(uiLayer) {
       scorePill,
       playerPill,
       waveBadge,
+      mayhemRotationPill,
       leaderboardPanel,
       leaderboardTab,
       powerupsWrap,
       bossPanel,
+      mayhemBossPanel,
       modeBadge,
     );
 
@@ -505,6 +588,7 @@ export function createHUD(uiLayer) {
       scorePill,
       playerPill,
       waveBadge,
+      mayhemRotationPill,
       leaderboardPanel,
       leaderboardTab,
       leaderboardList,
@@ -514,6 +598,9 @@ export function createHUD(uiLayer) {
       powerupFleet,
       bossPanel,
       bossFill,
+      mayhemBossPanel,
+      mayhemBossCount,
+      mayhemBossFill,
       modeBadge,
     };
 
@@ -590,12 +677,16 @@ export function createHUD(uiLayer) {
       right.style.color = 'rgba(255,255,255,0.92)';
       line.append(left, right);
       statsCard.appendChild(line);
-      return right;
+      return { line, left, right };
     };
 
-    const scoreValue = row('SCORE');
-    const bestValue = row('BEST');
-    const rankValue = row('RANK');
+    const scoreRow = row('SCORE');
+    const bestRow = row('BEST');
+    const rankRow = row('RANK');
+    const mayhemWavesRow = row('MAYHEM WAVES CLEARED');
+    mayhemWavesRow.line.style.display = 'none';
+    const mayhemBossesRow = row('TOTAL BOSSES DEFEATED');
+    mayhemBossesRow.line.style.display = 'none';
 
     const tagPanel = createPanel({
       width: '280px',
@@ -685,9 +776,11 @@ export function createHUD(uiLayer) {
 
     gameOverRefs = {
       waveReached,
-      scoreValue,
-      bestValue,
-      rankValue,
+      scoreRow,
+      bestRow,
+      rankRow,
+      mayhemWavesRow,
+      mayhemBossesRow,
       tagDisplay,
       tagInput,
       caret,
@@ -732,8 +825,8 @@ export function createHUD(uiLayer) {
 
       const best = updated[0]?.score ?? 0;
       const rank = getPlayerRank(entry.score);
-      gameOverRefs.bestValue.textContent = `${best}`;
-      gameOverRefs.rankValue.textContent = `#${rank}`;
+      gameOverRefs.bestRow.right.textContent = `${best}`;
+      gameOverRefs.rankRow.right.textContent = `#${rank}`;
       gameOverRefs.submitted = true;
 
       if (lastHudState) {
@@ -805,10 +898,24 @@ export function createHUD(uiLayer) {
     ensureHUD();
     lastHudState = { ...gameState };
 
-    refs.scorePill.textContent = `SCORE ${Math.max(0, gameState.score ?? 0)}`;
-    refs.waveBadge.textContent = `WAVE ${String(Math.max(1, gameState.wave ?? 1)).padStart(2, '0')}`;
-
     const mode = String(gameState.mode ?? '').toUpperCase();
+    const isMayhem = mode === 'MAYHEM';
+
+    refs.scorePill.textContent = `SCORE ${Math.max(0, gameState.score ?? 0)}${isMayhem ? '  x2' : ''}`;
+    refs.waveBadge.textContent = isMayhem
+      ? `MAYHEM · WAVE ${String(Math.max(1, gameState.mayhemWave ?? gameState.wave ?? 1)).padStart(2, '0')}`
+      : `WAVE ${String(Math.max(1, gameState.wave ?? 1)).padStart(2, '0')}`;
+
+    if (isMayhem) {
+      refs.waveBadge.style.background = 'rgba(255,40,20,0.06)';
+      refs.waveBadge.style.borderColor = 'rgba(255,40,20,0.25)';
+      refs.waveBadge.style.color = 'rgba(255,140,120,0.9)';
+    } else {
+      refs.waveBadge.style.background = 'rgba(255,255,255,0.04)';
+      refs.waveBadge.style.borderColor = 'rgba(255,255,255,0.12)';
+      refs.waveBadge.style.color = 'rgba(255,255,255,0.55)';
+    }
+
     refs.modeBadge.textContent = mode || 'MODE';
 
     const lives = Math.max(0, gameState.lives ?? 0);
@@ -836,6 +943,22 @@ export function createHUD(uiLayer) {
       refs.bossPanel.style.display = 'none';
     }
 
+    if (isMayhem) {
+      const total = Math.max(1, gameState.mayhemBossTotal ?? 1);
+      const remain = Math.max(0, gameState.mayhemBossRemaining ?? total);
+      const ratio = Math.max(0, Math.min(1, remain / total));
+      refs.mayhemBossPanel.style.display = 'block';
+      refs.mayhemBossCount.textContent = `${remain} / ${total}`;
+      refs.mayhemBossFill.style.width = `${ratio * 100}%`;
+    } else {
+      refs.mayhemBossPanel.style.display = 'none';
+    }
+
+    const showRotationNotice = isMayhem
+      && Number.isFinite(gameState.backspaceRotationNoticeUntil)
+      && performance.now() < gameState.backspaceRotationNoticeUntil;
+    refs.mayhemRotationPill.style.display = showRotationNotice ? 'block' : 'none';
+
     const currentScore = Math.max(0, gameState.score ?? 0);
     if (lastLeaderboardScore === null || currentScore !== lastLeaderboardScore) {
       refreshLeaderboardPanel(gameState);
@@ -849,7 +972,9 @@ export function createHUD(uiLayer) {
       refs.scorePill,
       refs.playerPill,
       refs.waveBadge,
+      refs.mayhemRotationPill,
       refs.leaderboardPanel,
+      refs.mayhemBossPanel,
       refs.modeBadge,
       refs.bossPanel,
       refs.powerupShield,
@@ -874,12 +999,12 @@ export function createHUD(uiLayer) {
     refs.bossPanel.style.left = '50%';
     refs.bossPanel.style.transform = mobile ? 'translateX(-50%)' : 'translateX(-50%)';
 
-    if (mobile) {
+    if (mobile || isMayhem) {
       refs.leaderboardTab.style.display = 'block';
       const canShow = showLeaderboardPanel && leaderboardDrawerOpen;
       refs.leaderboardPanel.style.display = canShow ? 'block' : 'none';
-      refs.leaderboardPanel.style.right = '0px';
-      refs.leaderboardPanel.style.top = '90px';
+      refs.leaderboardPanel.style.right = mobile ? '0px' : '16px';
+      refs.leaderboardPanel.style.top = mobile ? '90px' : '300px';
     } else {
       refs.leaderboardTab.style.display = 'none';
       refs.leaderboardPanel.style.display = showLeaderboardPanel ? 'block' : 'none';
@@ -898,15 +1023,30 @@ export function createHUD(uiLayer) {
       wave: Math.max(1, finalState?.wave ?? 1),
     };
 
-    const best = getBestScore()?.score ?? 0;
-    const rank = getPlayerRank(safeState.score);
+    const mayhemStats = finalState?.mayhem ?? null;
+    const best = mayhemStats ? Math.max(0, mayhemStats.bestScore ?? 0) : (getBestScore()?.score ?? 0);
+    const rank = mayhemStats ? 0 : getPlayerRank(safeState.score);
 
     gameOverRefs.finalState = safeState;
     gameOverRefs.submitted = false;
-    gameOverRefs.waveReached.textContent = `WAVE ${String(safeState.wave).padStart(2, '0')}`;
-    gameOverRefs.scoreValue.textContent = `${safeState.score}`;
-    gameOverRefs.bestValue.textContent = `${best}`;
-    gameOverRefs.rankValue.textContent = `#${rank}`;
+    gameOverRefs.waveReached.textContent = mayhemStats
+      ? 'MAYHEM OVER'
+      : `WAVE ${String(safeState.wave).padStart(2, '0')}`;
+    gameOverRefs.scoreRow.right.textContent = `${safeState.score}`;
+    gameOverRefs.bestRow.left.textContent = mayhemStats ? 'BEST MAYHEM' : 'BEST';
+    gameOverRefs.bestRow.right.textContent = `${best}`;
+    gameOverRefs.rankRow.line.style.display = mayhemStats ? 'none' : 'flex';
+    gameOverRefs.rankRow.right.textContent = `#${rank}`;
+
+    if (mayhemStats) {
+      gameOverRefs.mayhemWavesRow.line.style.display = 'flex';
+      gameOverRefs.mayhemBossesRow.line.style.display = 'flex';
+      gameOverRefs.mayhemWavesRow.right.textContent = `${Math.max(0, mayhemStats.wavesCleared ?? 0)}`;
+      gameOverRefs.mayhemBossesRow.right.textContent = `${Math.max(0, mayhemStats.totalBossesDefeated ?? 0)}`;
+    } else {
+      gameOverRefs.mayhemWavesRow.line.style.display = 'none';
+      gameOverRefs.mayhemBossesRow.line.style.display = 'none';
+    }
 
     const savedTag = localStorage.getItem('inversia_last_tag') || 'AAA';
     gameOverRefs.tagInput.value = savedTag.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 3);
@@ -941,6 +1081,19 @@ export function createHUD(uiLayer) {
     hideHUD();
     hidePauseMenu();
     clear();
+
+    const mayhemUnlocked = localStorage.getItem(MAYHEM_UNLOCK_KEY) === 'true';
+    const mayhemCard = mayhemUnlocked
+      ? `
+        <button class="inversia-card inversia-card-mayhem" type="button" data-mode="mayhem" aria-label="Start Mayhem mode">
+          <svg class="inversia-mayhem-icon" width="44" height="44" viewBox="0 0 54 60" aria-hidden="true">
+            <polygon points="27,58 2,3 52,3" fill="none" stroke="#ff3322" stroke-width="2.4" />
+          </svg>
+          <h2 class="inversia-card-title" style="color:#ff6d5f;">MAYHEM</h2>
+          <p class="inversia-card-subtitle" style="color:rgba(255,120,110,0.8);text-transform:none;">50 fighters · endless bosses</p>
+        </button>
+      `
+      : '';
 
     const menu = document.createElement('div');
     menu.className = 'inversia-menu';
@@ -978,6 +1131,7 @@ export function createHUD(uiLayer) {
           <h2 class="inversia-card-title">BRIDGE</h2>
           <p class="inversia-card-subtitle">cockpit view · coming soon</p>
         </div>
+        ${mayhemCard}
       </div>
       <button class="inversia-card" type="button" data-action="settings" style="position:absolute;bottom:52px;left:50%;transform:translateX(-50%);padding:10px 14px;min-width:180px;justify-content:center;align-items:center;">
         <h2 class="inversia-card-title" style="font-size:0.85rem;">SETTINGS</h2>
@@ -988,6 +1142,7 @@ export function createHUD(uiLayer) {
     const fluxButton = menu.querySelector('[data-mode="flux"]');
     const commandButton = menu.querySelector('[data-mode="command"]');
     const settingsButton = menu.querySelector('[data-action="settings"]');
+    const mayhemButton = menu.querySelector('[data-mode="mayhem"]');
 
     fluxButton?.addEventListener('click', () => {
       hideMenu();
@@ -997,6 +1152,11 @@ export function createHUD(uiLayer) {
     commandButton?.addEventListener('click', () => {
       hideMenu();
       startMode('command');
+    });
+
+    mayhemButton?.addEventListener('click', () => {
+      hideMenu();
+      startMode('mayhem');
     });
 
     settingsButton?.addEventListener('click', () => {

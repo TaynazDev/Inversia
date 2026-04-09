@@ -16,7 +16,6 @@ const PLAYER_BULLET_WIDTH = 2;
 const PLAYER_BULLET_HEIGHT = 10;
 const PLAYER_BULLET_SPEED = 9;
 const PLAYER_MAX_BULLETS = 4;
-const POWERUP_DROP_CHANCE = 0.15;
 const PLAYER_FLASH_FRAMES_ON_HIT = 3;
 const PLAYER_CONTACT_DAMAGE = 2;
 const FLUX_MULTI_SPREAD_COUNT = 5;
@@ -64,6 +63,7 @@ let resizeHandler = null;
 let keydownHandler = null;
 let keyupHandler = null;
 let touchControls = null;
+let backspaceUi = null;
 let lastFrameTime = 0;
 const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 
@@ -81,6 +81,10 @@ let fluxState = {
   multiShotUntil: 0,
   activePowerupLabel: null,
   activePowerupLabelUntil: 0,
+  activePowerupLabelColor: 'rgba(255,255,255,0.7)',
+  backspaceCount: 0,
+  laserFramesRemaining: 0,
+  backspaceFlashFrames: 0,
   enemyFormationOffsetX: 0,
   enemyFormationDirection: 1,
   enemies: [],
@@ -212,6 +216,11 @@ function handleKeyChange(event, isDown) {
   if (key === ' ' || key === 'spacebar') {
     fluxState.input.fire = isDown;
   }
+
+  if (key === 'backspace' && isDown) {
+    event.preventDefault();
+    triggerBackspaceLaser();
+  }
 }
 
 function getAabb(x, y, width, height) {
@@ -228,8 +237,17 @@ function overlapsAabb(a, b) {
 }
 
 function spawnPowerUp(x, y) {
-  const pu = currentContext.spawnPowerup(x, y);
-  fluxState.powerUps.push(pu);
+  const pu = currentContext.spawnDropPowerup?.(x, y, false);
+  if (pu) {
+    fluxState.powerUps.push(pu);
+  }
+}
+
+function spawnBossDrop(x, y) {
+  const pu = currentContext.spawnDropPowerup?.(x, y, true);
+  if (pu) {
+    fluxState.powerUps.push(pu);
+  }
 }
 
 function updatePowerups(canvas, now, dt) {
@@ -261,7 +279,14 @@ function updatePowerups(canvas, now, dt) {
 
   for (const pu of collected) {
     currentContext.audio?.playPowerup?.();
-    applyPowerup(pu.type, now);
+    if (pu.type === currentContext.BACKSPACE_TYPE) {
+      fluxState.backspaceCount += 1;
+      fluxState.activePowerupLabel = 'BACKSPACE STORED';
+      fluxState.activePowerupLabelUntil = now + 1000;
+      fluxState.activePowerupLabelColor = 'rgba(255,255,255,0.9)';
+    } else {
+      applyPowerup(pu.type, now);
+    }
   }
 }
 
@@ -270,6 +295,7 @@ function applyPowerup(type, now) {
 
   fluxState.activePowerupLabel = type.toUpperCase();
   fluxState.activePowerupLabelUntil = now + 3000;
+  fluxState.activePowerupLabelColor = 'rgba(255,255,255,0.7)';
 
   if (type === 'shield') {
     fluxState.shieldActive = true;
@@ -384,6 +410,197 @@ function updatePlayerBullets(canvas, dt) {
   );
 }
 
+function triggerBackspaceLaser() {
+  if (fluxState.laserFramesRemaining > 0) {
+    return;
+  }
+
+  if (fluxState.backspaceCount <= 0) {
+    fluxState.backspaceFlashFrames = 2;
+    return;
+  }
+
+  fluxState.backspaceCount -= 1;
+  fluxState.laserFramesRemaining = 300;
+}
+
+function getLaserDps() {
+  return 15;
+}
+
+function applyLaser(dt) {
+  if (fluxState.laserFramesRemaining <= 0) {
+    return;
+  }
+
+  const laserX = fluxState.x;
+  const removedEnemyIds = new Set();
+  for (const enemy of fluxState.enemies) {
+    if (Math.abs(enemy.x - laserX) <= 10) {
+      removedEnemyIds.add(enemy.id);
+      currentContext.gameState.score += 50;
+    }
+  }
+  if (removedEnemyIds.size > 0) {
+    fluxState.enemies = fluxState.enemies.filter((enemy) => !removedEnemyIds.has(enemy.id));
+  }
+
+  fluxState.enemyBullets = fluxState.enemyBullets.filter((bullet) => Math.abs(bullet.x - laserX) > 8);
+  fluxState.bossBullets = fluxState.bossBullets.filter((bullet) => Math.abs(bullet.x - laserX) > 8);
+
+  if (fluxState.boss && fluxState.boss.hp > 0) {
+    const left = fluxState.boss.x - BOSS_WIDTH / 2;
+    const right = fluxState.boss.x + BOSS_WIDTH / 2;
+    if (laserX >= left && laserX <= right) {
+      fluxState.boss.hp -= 15 * (dt / 60);
+      if (fluxState.boss.hp <= 0) {
+        fluxState.boss.hp = 0;
+      }
+    }
+  }
+
+  fluxState.laserFramesRemaining = Math.max(0, fluxState.laserFramesRemaining - dt);
+}
+
+function updateBackspaceUi() {
+  if (!backspaceUi) {
+    return;
+  }
+
+  const hasCharges = fluxState.backspaceCount > 0;
+  const active = fluxState.laserFramesRemaining > 0;
+  const flashing = fluxState.backspaceFlashFrames > 0;
+
+  backspaceUi.button.style.background = active
+    ? 'rgba(255,255,255,0.12)'
+    : hasCharges
+      ? 'rgba(255,255,255,0.05)'
+      : 'rgba(255,255,255,0.02)';
+  backspaceUi.button.style.borderColor = active
+    ? 'rgba(255,255,255,0.6)'
+    : hasCharges
+      ? 'rgba(255,255,255,0.2)'
+      : 'rgba(255,255,255,0.06)';
+  backspaceUi.button.style.cursor = hasCharges ? 'pointer' : 'default';
+  backspaceUi.icon.style.opacity = hasCharges ? '1' : '0.15';
+  backspaceUi.badge.style.display = hasCharges ? 'flex' : 'none';
+  if (hasCharges) {
+    backspaceUi.badge.textContent = fluxState.backspaceCount > 9 ? '9+' : String(fluxState.backspaceCount);
+  }
+
+  const ratio = Math.max(0, Math.min(1, fluxState.laserFramesRemaining / 300));
+  backspaceUi.timer.style.display = active ? 'block' : 'none';
+  backspaceUi.timer.style.width = `${52 * ratio}px`;
+  backspaceUi.dpsLabel.style.display = active ? 'block' : 'none';
+  if (active) {
+    backspaceUi.dpsLabel.textContent = `[ ${getLaserDps().toFixed(1)} DPS ]`;
+  }
+
+  if (active) {
+    const pulse = 0.3 + ((Math.sin(Date.now() * 0.02) + 1) * 0.25);
+    backspaceUi.button.style.borderColor = `rgba(255,255,255,${pulse.toFixed(3)})`;
+  }
+
+  if (flashing) {
+    backspaceUi.button.style.background = 'rgba(255,255,255,0.3)';
+  }
+}
+
+function createBackspaceUi() {
+  if (backspaceUi || !currentContext?.uiLayer) {
+    return;
+  }
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = [
+    'position:fixed',
+    'right:20px',
+    `bottom:${isTouchDevice ? 110 : 20}px`,
+    'z-index:8',
+    'pointer-events:auto',
+  ].join(';');
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.style.cssText = [
+    'width:52px',
+    'height:52px',
+    'border-radius:12px',
+    'border:0.5px solid rgba(255,255,255,0.2)',
+    'background:rgba(255,255,255,0.05)',
+    'backdrop-filter:blur(10px)',
+    '-webkit-backdrop-filter:blur(10px)',
+    'position:relative',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'cursor:pointer',
+  ].join(';');
+
+  const icon = document.createElement('div');
+  icon.textContent = '⟵';
+  icon.style.cssText = 'color:#fff;font-size:18px;line-height:1;';
+  button.appendChild(icon);
+
+  const badge = document.createElement('div');
+  badge.style.cssText = [
+    'position:absolute',
+    'right:-5px',
+    'bottom:-5px',
+    'width:18px',
+    'height:18px',
+    'border-radius:50%',
+    'background:#fff',
+    'color:#000',
+    'font-family:"Courier New", monospace',
+    'font-size:10px',
+    'font-weight:700',
+    'display:none',
+    'align-items:center',
+    'justify-content:center',
+  ].join(';');
+
+  const timer = document.createElement('div');
+  timer.style.cssText = [
+    'position:absolute',
+    'left:0',
+    'bottom:-8px',
+    'height:2px',
+    'width:52px',
+    'background:rgba(255,255,255,0.5)',
+    'display:none',
+  ].join(';');
+
+  const dpsLabel = document.createElement('div');
+  dpsLabel.style.cssText = [
+    'position:absolute',
+    'left:0',
+    'bottom:-20px',
+    'width:52px',
+    'text-align:center',
+    'font-family:"Courier New", monospace',
+    'font-size:9px',
+    'color:rgba(255,255,255,0.4)',
+    'display:none',
+  ].join(';');
+
+  button.addEventListener('click', (e) => {
+    e.preventDefault();
+    triggerBackspaceLaser();
+  });
+
+  wrap.append(button, badge, timer, dpsLabel);
+  currentContext.uiLayer.appendChild(wrap);
+  backspaceUi = { wrap, button, icon, badge, timer, dpsLabel };
+}
+
+function removeBackspaceUi() {
+  if (backspaceUi?.wrap?.parentElement) {
+    backspaceUi.wrap.parentElement.removeChild(backspaceUi.wrap);
+  }
+  backspaceUi = null;
+}
+
 function resolveCollisions() {
   const { gameState } = currentContext;
   const removedEnemyIds = new Set();
@@ -411,9 +628,7 @@ function resolveCollisions() {
         gameState.score += 100;
         currentContext.audio?.play?.('enemyDeath');
 
-        if (Math.random() < POWERUP_DROP_CHANCE) {
-          spawnPowerUp(enemy.x, enemy.y);
-        }
+        spawnPowerUp(enemy.x, enemy.y);
       }
 
       break;
@@ -564,6 +779,9 @@ function resolveBossCollisions() {
 
 function handleBossDeath(now) {
   currentContext.gameState.score += BOSS_SCORE;
+  if (fluxState.boss) {
+    spawnBossDrop(fluxState.boss.x, fluxState.boss.y);
+  }
   currentContext.audio?.playBossDeath?.();
   fluxState.bossBullets = [];
   fluxState.boss = null;
@@ -1013,7 +1231,20 @@ function renderFrame(ctx) {
   }
 
   for (const powerUp of fluxState.powerUps) {
-    drawCircle(ctx, powerUp.x, powerUp.y, powerUp.radius, powerUp.color, 14);
+    if (powerUp.type === currentContext.BACKSPACE_TYPE) {
+      drawCircle(ctx, powerUp.x, powerUp.y, powerUp.radius, '#ffffff', 16);
+      ctx.beginPath();
+      ctx.moveTo(powerUp.x + 3, powerUp.y);
+      ctx.lineTo(powerUp.x - 3, powerUp.y);
+      ctx.lineTo(powerUp.x - 1, powerUp.y - 2);
+      ctx.moveTo(powerUp.x - 3, powerUp.y);
+      ctx.lineTo(powerUp.x - 1, powerUp.y + 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      drawCircle(ctx, powerUp.x, powerUp.y, powerUp.radius, powerUp.color, 14);
+    }
   }
 
   if (fluxState.boss && fluxState.boss.hp > 0) {
@@ -1049,7 +1280,7 @@ function renderFrame(ctx) {
   const now = performance.now();
   if (fluxState.activePowerupLabel && now < fluxState.activePowerupLabelUntil) {
     ctx.font = '10px "Courier New", monospace';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+    ctx.fillStyle = fluxState.activePowerupLabelColor || 'rgba(255, 255, 255, 0.7)';
     ctx.textAlign = 'center';
     ctx.fillText(fluxState.activePowerupLabel, fluxState.x, fluxState.y - PLAYER_HEIGHT / 2 - 14);
     ctx.textAlign = 'start';
@@ -1057,7 +1288,39 @@ function renderFrame(ctx) {
     fluxState.activePowerupLabel = null;
   }
 
+  if (fluxState.laserFramesRemaining > 0) {
+    const laserX = fluxState.x;
+    const originY = fluxState.y - PLAYER_HEIGHT / 2;
+    ctx.beginPath();
+    ctx.moveTo(laserX, originY);
+    ctx.lineTo(laserX, 0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(laserX, originY);
+    ctx.lineTo(laserX, 0);
+    ctx.strokeStyle = '#ffffff';
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur = 28;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.lineWidth = 1;
+  }
+
   drawHealthBar(ctx);
+}
+
+function clearArenaForUnlock() {
+  fluxState.enemies = [];
+  fluxState.enemyBullets = [];
+  fluxState.playerBullets = [];
+  fluxState.powerUps = [];
+  fluxState.bossBullets = [];
+  fluxState.boss = null;
+  fluxState.bossPhase = false;
 }
 
 function gameLoop() {
@@ -1076,6 +1339,13 @@ function gameLoop() {
 
   if (!gameState.paused) {
     const waveEvent = currentContext.waveController.update(now);
+    if (waveEvent.action === 'unlock-mayhem') {
+      clearArenaForUnlock();
+      currentContext.hud?.hideHUD?.();
+      currentContext.onWave100Unlock?.();
+      return;
+    }
+
     if (waveEvent.action === 'spawn-boss') {
       spawnBoss(canvas);
     } else if (waveEvent.action === 'spawn-formation') {
@@ -1098,16 +1368,21 @@ function gameLoop() {
       }
 
       updatePowerups(canvas, now, dt);
+      applyLaser(dt);
       checkWaveTransition(now);
     }
 
     touchControls?.update?.();
+    updateBackspaceUi();
     syncHudState(now);
     currentContext.hud?.updateHUD?.(currentContext.gameState);
     renderFrame(ctx);
 
     if (fluxState.playerFlashFrames > 0) {
       fluxState.playerFlashFrames -= 1;
+    }
+    if (fluxState.backspaceFlashFrames > 0) {
+      fluxState.backspaceFlashFrames -= 1;
     }
   }
 
@@ -1144,6 +1419,10 @@ export function startFlux(context = currentContext) {
     multiShotUntil: 0,
     activePowerupLabel: null,
     activePowerupLabelUntil: 0,
+    activePowerupLabelColor: 'rgba(255,255,255,0.7)',
+    backspaceCount: 0,
+    laserFramesRemaining: 0,
+    backspaceFlashFrames: 0,
     enemyFormationOffsetX: 0,
     enemyFormationDirection: 1,
     enemies: initializeEnemies(),
@@ -1184,6 +1463,7 @@ export function startFlux(context = currentContext) {
   currentContext.hud?.updateHUD?.(currentContext.gameState);
   lastFrameTime = 0;
   setupTouchControls();
+  createBackspaceUi();
 
   resizeHandler = () => {
     const prevWidth = canvas.clientWidth || window.innerWidth;
@@ -1307,6 +1587,7 @@ export function stopFlux() {
   removeBossHpHud();
   currentContext?.hud?.hidePauseMenu?.();
   removeTouchControls();
+  removeBackspaceUi();
 
   if (currentContext?.gameState?.mode === 'flux') {
     currentContext.gameState.running = false;

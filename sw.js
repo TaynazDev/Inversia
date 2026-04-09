@@ -11,7 +11,8 @@ const ASSETS = [
   './manifest.json',
   './modes/flux.js',
   './modes/command.js',
-  './modes/bridge.js'
+  './modes/bridge.js',
+  './modes/mayhem.js'
 ];
 
 self.addEventListener('install', (event) => {
