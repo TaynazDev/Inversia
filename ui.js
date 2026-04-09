@@ -175,6 +175,11 @@ export function createHUD(uiLayer) {
   let loadingRoot = null;
   let pauseRoot = null;
   let showLeaderboardPanel = localStorage.getItem(PREF_SHOW_LEADERBOARD) !== '0';
+  let leaderboardDrawerOpen = false;
+
+  function isMobileViewport() {
+    return window.innerWidth < 768;
+  }
 
   const basePanelStyle = {
     background: 'rgba(255,255,255,0.04)',
@@ -400,6 +405,26 @@ export function createHUD(uiLayer) {
       lineHeight: '1.7',
     });
 
+    const leaderboardTab = createPanel({
+      position: 'absolute',
+      right: '0px',
+      top: '45%',
+      transform: 'translateY(-50%)',
+      padding: '8px 10px',
+      borderTopRightRadius: '0',
+      borderBottomRightRadius: '0',
+      pointerEvents: 'auto',
+      cursor: 'pointer',
+      zIndex: '14',
+      color: 'rgba(255,255,255,0.72)',
+      userSelect: 'none',
+      display: 'none',
+    });
+    leaderboardTab.textContent = 'LB';
+    leaderboardTab.addEventListener('click', () => {
+      leaderboardDrawerOpen = !leaderboardDrawerOpen;
+    });
+
     const leaderboardTitle = document.createElement('div');
     leaderboardTitle.textContent = 'LEADERBOARD';
     leaderboardTitle.style.color = 'rgba(255,255,255,0.72)';
@@ -470,6 +495,7 @@ export function createHUD(uiLayer) {
       playerPill,
       waveBadge,
       leaderboardPanel,
+      leaderboardTab,
       powerupsWrap,
       bossPanel,
       modeBadge,
@@ -480,7 +506,9 @@ export function createHUD(uiLayer) {
       playerPill,
       waveBadge,
       leaderboardPanel,
+      leaderboardTab,
       leaderboardList,
+      powerupsWrap,
       powerupShield,
       powerupMulti,
       powerupFleet,
@@ -813,7 +841,51 @@ export function createHUD(uiLayer) {
       refreshLeaderboardPanel(gameState);
     }
 
-    refs.leaderboardPanel.style.display = showLeaderboardPanel ? 'block' : 'none';
+    const mobile = isMobileViewport();
+    const panelScale = mobile ? 0.85 : 1;
+    const panelRadius = mobile ? '20px' : '16px';
+
+    const commonPanels = [
+      refs.scorePill,
+      refs.playerPill,
+      refs.waveBadge,
+      refs.leaderboardPanel,
+      refs.modeBadge,
+      refs.bossPanel,
+      refs.powerupShield,
+      refs.powerupMulti,
+      refs.powerupFleet,
+    ];
+    for (const panel of commonPanels) {
+      panel.style.transform = mobile ? `scale(${panelScale})` : '';
+      panel.style.transformOrigin = 'top left';
+      panel.style.borderRadius = panelRadius;
+      panel.style.padding = mobile && panel.style.padding ? '12px' : panel.style.padding;
+      panel.style.fontSize = '11px';
+    }
+
+    refs.powerupsWrap.style.left = mobile ? '16px' : '50%';
+    refs.powerupsWrap.style.top = mobile ? '16px' : '';
+    refs.powerupsWrap.style.bottom = mobile ? '' : '16px';
+    refs.powerupsWrap.style.transform = mobile ? '' : 'translateX(-50%)';
+
+    refs.bossPanel.style.top = mobile ? '' : '54px';
+    refs.bossPanel.style.bottom = mobile ? '22px' : '';
+    refs.bossPanel.style.left = '50%';
+    refs.bossPanel.style.transform = mobile ? 'translateX(-50%)' : 'translateX(-50%)';
+
+    if (mobile) {
+      refs.leaderboardTab.style.display = 'block';
+      const canShow = showLeaderboardPanel && leaderboardDrawerOpen;
+      refs.leaderboardPanel.style.display = canShow ? 'block' : 'none';
+      refs.leaderboardPanel.style.right = '0px';
+      refs.leaderboardPanel.style.top = '90px';
+    } else {
+      refs.leaderboardTab.style.display = 'none';
+      refs.leaderboardPanel.style.display = showLeaderboardPanel ? 'block' : 'none';
+      refs.leaderboardPanel.style.right = '16px';
+      refs.leaderboardPanel.style.top = '74px';
+    }
   }
 
   function showGameOver(finalState) {

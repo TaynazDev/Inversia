@@ -8,6 +8,15 @@ import { bridgeMode } from './modes/bridge.js';
 
 const canvas = document.getElementById('gameCanvas');
 const uiLayer = document.getElementById('ui-layer');
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+const MOBILE_GLOW_CAP = 14;
+
+function getGlow(ctx, glowStrength) {
+  if (ctx?.__allowFullGlow || !isTouchDevice) {
+    return glowStrength;
+  }
+  return Math.min(glowStrength, MOBILE_GLOW_CAP);
+}
 
 const starfield = createStarfield(canvas);
 const hud = createHUD(uiLayer);
@@ -195,7 +204,7 @@ export function drawTriangle(ctx, x, y, width, height, direction, color, glowStr
   ctx.closePath();
   ctx.strokeStyle = color;
   ctx.shadowColor = color;
-  ctx.shadowBlur = glowStrength;
+  ctx.shadowBlur = getGlow(ctx, glowStrength);
   ctx.stroke();
   ctx.shadowBlur = 0;
 }
@@ -205,7 +214,7 @@ export function drawCircle(ctx, x, y, radius, color, glowStrength) {
   ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.strokeStyle = color;
   ctx.shadowColor = color;
-  ctx.shadowBlur = glowStrength;
+  ctx.shadowBlur = getGlow(ctx, glowStrength);
   ctx.stroke();
   ctx.shadowBlur = 0;
 }
@@ -216,7 +225,7 @@ export function drawBullet(ctx, x, y, width, height, color, glowStrength) {
 
   ctx.fillStyle = color;
   ctx.shadowColor = color;
-  ctx.shadowBlur = glowStrength;
+  ctx.shadowBlur = getGlow(ctx, glowStrength);
   ctx.fillRect(left, top, width, height);
   ctx.shadowBlur = 0;
 }
@@ -279,3 +288,48 @@ starfield.start();
 hud.showLoading(1000).then(() => {
   hud.showMainMenu(startMode, audio);
 });
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+if (isTouchDevice) {
+  const rotateOverlay = document.createElement('div');
+  rotateOverlay.style.cssText = `
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    flex-direction:column;gap:10px;z-index:30;pointer-events:none;
+    background:rgba(0,0,0,0.7);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    color:rgba(255,255,255,0.9);font-family:'Courier New',monospace;letter-spacing:0.16em;
+  `;
+  rotateOverlay.innerHTML = `<div style="font-size:42px;opacity:.8;">↻</div><div>ROTATE DEVICE</div>`;
+  uiLayer.appendChild(rotateOverlay);
+
+  const updateRotateOverlay = () => {
+    const portrait = window.innerHeight > window.innerWidth;
+    rotateOverlay.style.display = portrait ? 'flex' : 'none';
+  };
+
+  const tryLockLandscape = async () => {
+    try {
+      if (screen.orientation?.lock) {
+        await screen.orientation.lock('landscape');
+      }
+    } catch {
+      updateRotateOverlay();
+    }
+  };
+
+  const firstInteract = () => {
+    tryLockLandscape();
+    window.removeEventListener('click', firstInteract);
+    window.removeEventListener('touchstart', firstInteract);
+    window.removeEventListener('keydown', firstInteract);
+  };
+
+  window.addEventListener('click', firstInteract, { once: true });
+  window.addEventListener('touchstart', firstInteract, { once: true });
+  window.addEventListener('keydown', firstInteract, { once: true });
+  window.addEventListener('resize', updateRotateOverlay);
+  window.addEventListener('orientationchange', updateRotateOverlay);
+  updateRotateOverlay();
+}
