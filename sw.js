@@ -1,4 +1,4 @@
-const CACHE_NAME = 'inversia-v1';
+const CACHE_NAME = 'inversia-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -12,7 +12,8 @@ const ASSETS = [
   './modes/flux.js',
   './modes/command.js',
   './modes/bridge.js',
-  './modes/mayhem.js'
+  './modes/mayhem.js',
+  './modes/invasion.js'
 ];
 
 self.addEventListener('install', (event) => {

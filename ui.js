@@ -5,6 +5,9 @@ const GAME_OVER_STYLE_ID = 'inversia-game-over-style';
 const PREF_SHOW_LEADERBOARD = 'inversia_pref_show_leaderboard';
 const PREF_MASTER_VOLUME = 'inversia_pref_master_volume';
 const MAYHEM_UNLOCK_KEY = 'inversia_mayhem_unlocked';
+const INVASION_UNLOCK_KEY = 'inversia_invasion_unlocked';
+const MAYHEM_CHEAT_CODE = 'CR4ZYM0D3';
+const INVASION_CHEAT_CODE = '1NV4S10NY4';
 
 function ensureMenuStyles() {
   if (document.getElementById(MENU_STYLE_ID)) {
@@ -91,6 +94,23 @@ function ensureMenuStyles() {
       border-color: rgba(255, 50, 34, 0.45);
     }
 
+    .inversia-card-invasion {
+      background: rgba(20, 80, 255, 0.06);
+      border: 0.5px solid rgba(20, 80, 255, 0.25);
+      min-height: 180px;
+      animation: inversia-mayhem-card-in 260ms ease;
+    }
+
+    .inversia-card-invasion:hover {
+      background: rgba(20, 80, 255, 0.11);
+      border-color: rgba(20, 80, 255, 0.45);
+    }
+
+    .inversia-invasion-icon {
+      filter: drop-shadow(0 0 14px rgba(26, 128, 255, 0.45));
+      animation: inversia-invasion-pulse 1.8s ease-in-out infinite;
+    }
+
     .inversia-mayhem-icon {
       filter: drop-shadow(0 0 14px rgba(255, 50, 34, 0.45));
       animation: inversia-mayhem-pulse 1.6s ease-in-out infinite;
@@ -104,6 +124,11 @@ function ensureMenuStyles() {
     @keyframes inversia-mayhem-pulse {
       0%, 100% { filter: drop-shadow(0 0 10px rgba(255, 50, 34, 0.35)); }
       50% { filter: drop-shadow(0 0 22px rgba(255, 50, 34, 0.65)); }
+    }
+
+    @keyframes inversia-invasion-pulse {
+      0%, 100% { filter: drop-shadow(0 0 10px rgba(26, 128, 255, 0.35)); }
+      50% { filter: drop-shadow(0 0 24px rgba(26, 128, 255, 0.68)); }
     }
 
     .inversia-card-title {
@@ -162,6 +187,10 @@ function ensureMenuStyles() {
       }
 
       .inversia-card-mayhem {
+        min-height: 198px;
+      }
+
+      .inversia-card-invasion {
         min-height: 198px;
       }
     }
@@ -591,6 +620,7 @@ export function createHUD(uiLayer) {
       mayhemRotationPill,
       leaderboardPanel,
       leaderboardTab,
+      leaderboardTitle,
       leaderboardList,
       powerupsWrap,
       powerupShield,
@@ -900,13 +930,23 @@ export function createHUD(uiLayer) {
 
     const mode = String(gameState.mode ?? '').toUpperCase();
     const isMayhem = mode === 'MAYHEM';
+    const isInvasion = mode === 'INVASION';
+    const invasionState = gameState.invasion ?? null;
 
     refs.scorePill.textContent = `SCORE ${Math.max(0, gameState.score ?? 0)}${isMayhem ? '  x2' : ''}`;
-    refs.waveBadge.textContent = isMayhem
-      ? `MAYHEM · WAVE ${String(Math.max(1, gameState.mayhemWave ?? gameState.wave ?? 1)).padStart(2, '0')}`
-      : `WAVE ${String(Math.max(1, gameState.wave ?? 1)).padStart(2, '0')}`;
+    if (isInvasion && invasionState) {
+      refs.waveBadge.textContent = `${invasionState.planetName ?? '???'}  ${Math.max(0, invasionState.planetHp ?? 0)} / ${Math.max(1, invasionState.planetMaxHp ?? 5000)}`;
+    } else {
+      refs.waveBadge.textContent = isMayhem
+        ? `MAYHEM · WAVE ${String(Math.max(1, gameState.mayhemWave ?? gameState.wave ?? 1)).padStart(2, '0')}`
+        : `WAVE ${String(Math.max(1, gameState.wave ?? 1)).padStart(2, '0')}`;
+    }
 
-    if (isMayhem) {
+    if (isInvasion) {
+      refs.waveBadge.style.background = 'rgba(20,80,255,0.08)';
+      refs.waveBadge.style.borderColor = 'rgba(20,80,255,0.3)';
+      refs.waveBadge.style.color = 'rgba(130,175,255,0.95)';
+    } else if (isMayhem) {
       refs.waveBadge.style.background = 'rgba(255,40,20,0.06)';
       refs.waveBadge.style.borderColor = 'rgba(255,40,20,0.25)';
       refs.waveBadge.style.color = 'rgba(255,140,120,0.9)';
@@ -920,9 +960,27 @@ export function createHUD(uiLayer) {
 
     const lives = Math.max(0, gameState.lives ?? 0);
     const fleet = Math.max(0, gameState.fleetCount ?? 0);
-    if (mode === 'COMMAND') {
+    if (isInvasion && invasionState) {
+      const counterMode = invasionState.counterMode === 'bosses' ? 'bosses' : 'reds';
+      const transitionActive = Number.isFinite(invasionState.counterTransitionUntil)
+        && performance.now() < invasionState.counterTransitionUntil;
+      refs.playerPill.style.display = 'block';
+      refs.playerPill.textContent = counterMode === 'bosses'
+        ? `BOSSES ${Math.max(0, invasionState.bossesKilled ?? 0)} / ${Math.max(1, invasionState.bossesTotal ?? 5)}`
+        : `REDS ${Math.max(0, invasionState.redKilled ?? 0)} / ${Math.max(1, invasionState.redTotal ?? 300)}`;
+      refs.playerPill.style.background = 'rgba(255,40,20,0.06)';
+      refs.playerPill.style.borderColor = 'rgba(255,40,20,0.22)';
+      refs.playerPill.style.color = 'rgba(255,120,110,0.88)';
+      refs.playerPill.style.opacity = transitionActive ? '0.82' : '1';
+      refs.playerPill.style.transform = transitionActive ? 'translateY(-4px)' : '';
+    } else if (mode === 'COMMAND' || mode === 'INVASION') {
       refs.playerPill.style.display = 'block';
       refs.playerPill.textContent = `LIVES ${lives} · FLEET ${fleet}`;
+      refs.playerPill.style.background = 'rgba(0,255,120,0.05)';
+      refs.playerPill.style.borderColor = 'rgba(0,255,120,0.2)';
+      refs.playerPill.style.color = 'rgba(180,255,210,0.75)';
+      refs.playerPill.style.opacity = '1';
+      refs.playerPill.style.transform = '';
     } else {
       refs.playerPill.style.display = 'none';
     }
@@ -959,9 +1017,29 @@ export function createHUD(uiLayer) {
       && performance.now() < gameState.backspaceRotationNoticeUntil;
     refs.mayhemRotationPill.style.display = showRotationNotice ? 'block' : 'none';
 
-    const currentScore = Math.max(0, gameState.score ?? 0);
-    if (lastLeaderboardScore === null || currentScore !== lastLeaderboardScore) {
-      refreshLeaderboardPanel(gameState);
+    if (isInvasion && invasionState) {
+      refs.leaderboardPanel.style.display = 'block';
+      refs.leaderboardPanel.style.left = '16px';
+      refs.leaderboardPanel.style.right = '';
+      refs.leaderboardPanel.style.top = '74px';
+      refs.leaderboardTitle.textContent = 'FLEET STATUS';
+      refs.leaderboardList.innerHTML = '';
+      const lines = Array.isArray(invasionState.fleetLines) ? invasionState.fleetLines : [];
+      for (const line of lines) {
+        const row = document.createElement('div');
+        row.textContent = line;
+        row.style.color = line.includes('DESTROYED')
+          ? 'rgba(255,120,110,0.55)'
+          : 'rgba(180,255,210,0.85)';
+        refs.leaderboardList.appendChild(row);
+      }
+    } else {
+      refs.leaderboardPanel.style.left = '';
+      refs.leaderboardTitle.textContent = 'LEADERBOARD';
+      const currentScore = Math.max(0, gameState.score ?? 0);
+      if (lastLeaderboardScore === null || currentScore !== lastLeaderboardScore) {
+        refreshLeaderboardPanel(gameState);
+      }
     }
 
     const mobile = isMobileViewport();
@@ -999,7 +1077,10 @@ export function createHUD(uiLayer) {
     refs.bossPanel.style.left = '50%';
     refs.bossPanel.style.transform = mobile ? 'translateX(-50%)' : 'translateX(-50%)';
 
-    if (mobile || isMayhem) {
+    if (isInvasion) {
+      refs.leaderboardTab.style.display = 'none';
+      refs.leaderboardPanel.style.display = 'block';
+    } else if (mobile || isMayhem) {
       refs.leaderboardTab.style.display = 'block';
       const canShow = showLeaderboardPanel && leaderboardDrawerOpen;
       refs.leaderboardPanel.style.display = canShow ? 'block' : 'none';
@@ -1083,6 +1164,7 @@ export function createHUD(uiLayer) {
     clear();
 
     const mayhemUnlocked = localStorage.getItem(MAYHEM_UNLOCK_KEY) === 'true';
+    const invasionUnlocked = localStorage.getItem(INVASION_UNLOCK_KEY) === 'true';
     const mayhemCard = mayhemUnlocked
       ? `
         <button class="inversia-card inversia-card-mayhem" type="button" data-mode="mayhem" aria-label="Start Mayhem mode">
@@ -1091,6 +1173,17 @@ export function createHUD(uiLayer) {
           </svg>
           <h2 class="inversia-card-title" style="color:#ff6d5f;">MAYHEM</h2>
           <p class="inversia-card-subtitle" style="color:rgba(255,120,110,0.8);text-transform:none;">50 fighters · endless bosses</p>
+        </button>
+      `
+      : '';
+    const invasionCard = invasionUnlocked
+      ? `
+        <button class="inversia-card inversia-card-invasion" type="button" data-mode="invasion" aria-label="Start Invasion mode">
+          <svg class="inversia-invasion-icon" width="46" height="34" viewBox="0 0 100 60" aria-hidden="true">
+            <path d="M 8 52 A 42 42 0 0 1 92 52" fill="none" stroke="#1a80ff" stroke-width="2.6" />
+          </svg>
+          <h2 class="inversia-card-title" style="color:#1a80ff;">INVASION</h2>
+          <p class="inversia-card-subtitle" style="color:rgba(130,175,255,0.85);text-transform:none;">5 motherships · capture the planet</p>
         </button>
       `
       : '';
@@ -1132,9 +1225,13 @@ export function createHUD(uiLayer) {
           <p class="inversia-card-subtitle">cockpit view · coming soon</p>
         </div>
         ${mayhemCard}
+        ${invasionCard}
       </div>
       <button class="inversia-card" type="button" data-action="settings" style="position:absolute;bottom:52px;left:50%;transform:translateX(-50%);padding:10px 14px;min-width:180px;justify-content:center;align-items:center;">
         <h2 class="inversia-card-title" style="font-size:0.85rem;">SETTINGS</h2>
+      </button>
+      <button class="inversia-card" type="button" data-action="cheats" style="position:absolute;bottom:104px;left:50%;transform:translateX(-50%);padding:10px 14px;min-width:180px;justify-content:center;align-items:center;">
+        <h2 class="inversia-card-title" style="font-size:0.85rem;">CHEAT CODES</h2>
       </button>
       <div class="inversia-bottom">BEST SCORE</div>
     `;
@@ -1142,7 +1239,9 @@ export function createHUD(uiLayer) {
     const fluxButton = menu.querySelector('[data-mode="flux"]');
     const commandButton = menu.querySelector('[data-mode="command"]');
     const settingsButton = menu.querySelector('[data-action="settings"]');
+    const cheatButton = menu.querySelector('[data-action="cheats"]');
     const mayhemButton = menu.querySelector('[data-mode="mayhem"]');
+    const invasionButton = menu.querySelector('[data-mode="invasion"]');
 
     fluxButton?.addEventListener('click', () => {
       hideMenu();
@@ -1157,6 +1256,11 @@ export function createHUD(uiLayer) {
     mayhemButton?.addEventListener('click', () => {
       hideMenu();
       startMode('mayhem');
+    });
+
+    invasionButton?.addEventListener('click', () => {
+      hideMenu();
+      startMode('invasion');
     });
 
     settingsButton?.addEventListener('click', () => {
@@ -1249,6 +1353,114 @@ export function createHUD(uiLayer) {
       panel.append(heading, volumeWrap, leaderboardToggle, clearButton, closeButton);
       menu.appendChild(panel);
       audioEngineRef?.setMasterVolume?.(Number(slider.value) / 100);
+    });
+
+    cheatButton?.addEventListener('click', () => {
+      const panel = createPanel({
+        position: 'absolute',
+        left: '50%',
+        top: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: '320px',
+        padding: '14px',
+        pointerEvents: 'auto',
+        zIndex: '4',
+      });
+
+      const heading = document.createElement('div');
+      heading.textContent = 'CHEAT CODES';
+      heading.style.color = 'rgba(255,255,255,0.9)';
+      heading.style.marginBottom = '10px';
+
+      const hint = document.createElement('div');
+      hint.textContent = 'ENTER CODE';
+      hint.style.fontSize = '11px';
+      hint.style.letterSpacing = '0.14em';
+      hint.style.color = 'rgba(255,255,255,0.55)';
+      hint.style.marginBottom = '8px';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.autocomplete = 'off';
+      input.autocapitalize = 'characters';
+      input.spellcheck = false;
+      input.placeholder = 'TYPE CODE';
+      input.style.width = '100%';
+      input.style.boxSizing = 'border-box';
+      input.style.padding = '10px';
+      input.style.borderRadius = '10px';
+      input.style.border = '0.5px solid rgba(255,255,255,0.22)';
+      input.style.background = 'rgba(0,0,0,0.3)';
+      input.style.color = 'rgba(255,255,255,0.9)';
+      input.style.fontFamily = '"Courier New", monospace';
+      input.style.letterSpacing = '0.12em';
+
+      const status = document.createElement('div');
+      status.style.marginTop = '8px';
+      status.style.minHeight = '16px';
+      status.style.fontSize = '11px';
+      status.style.letterSpacing = '0.1em';
+      status.style.color = 'rgba(255,255,255,0.65)';
+
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '8px';
+      actions.style.marginTop = '10px';
+
+      const applyButton = createPanel({
+        pointerEvents: 'auto',
+        cursor: 'pointer',
+        padding: '8px 10px',
+        userSelect: 'none',
+      });
+      applyButton.textContent = 'APPLY';
+
+      const closeButton = createPanel({
+        pointerEvents: 'auto',
+        cursor: 'pointer',
+        padding: '8px 10px',
+        userSelect: 'none',
+        color: 'rgba(255,255,255,0.75)',
+      });
+      closeButton.textContent = 'CLOSE';
+
+      const tryApply = () => {
+        const code = input.value.replace(/\s+/g, '').toUpperCase();
+        if (code === MAYHEM_CHEAT_CODE) {
+          localStorage.setItem(MAYHEM_UNLOCK_KEY, 'true');
+          status.textContent = 'MAYHEM UNLOCKED';
+          status.style.color = 'rgba(255,120,110,0.9)';
+          window.setTimeout(() => {
+            showMainMenu(startModeHandler, audioEngineRef);
+          }, 220);
+          return;
+        }
+        if (code === INVASION_CHEAT_CODE) {
+          localStorage.setItem(INVASION_UNLOCK_KEY, 'true');
+          status.textContent = 'INVASION UNLOCKED';
+          status.style.color = 'rgba(130,175,255,0.95)';
+          window.setTimeout(() => {
+            showMainMenu(startModeHandler, audioEngineRef);
+          }, 220);
+          return;
+        }
+        status.textContent = 'INVALID CODE';
+        status.style.color = 'rgba(255,130,130,0.85)';
+      };
+
+      applyButton.onclick = tryApply;
+      closeButton.onclick = () => panel.remove();
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          tryApply();
+        }
+      });
+
+      actions.append(applyButton, closeButton);
+      panel.append(heading, hint, input, status, actions);
+      menu.appendChild(panel);
+      input.focus();
     });
 
     uiLayer.appendChild(menu);
