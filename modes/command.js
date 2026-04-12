@@ -15,6 +15,8 @@ const STARTING_FLEET_COUNT = 12;
 const MAX_FLEET_COUNT = 30;
 const MAYHEM_STARTING_FLEET_COUNT = 50;
 const MAYHEM_MAX_FLEET_COUNT = 50;
+const INVASION_STARTING_FLEET_COUNT = 50;
+const INVASION_MAX_FLEET_COUNT = 50;
 // Y-offsets from mothership centre for each formation row
 const FLEET_ROW_Y = [-60, 0, 55];
 const MAYHEM_FLEET_ROW_Y = [-100, -65, 0, 50, 90];
@@ -26,6 +28,8 @@ const FIGHTER_ATTACK_SPEED = 2.8;
 const FIGHTER_RETURN_SPEED = 3.5;
 const FIGHTER_FLANK_SPEED = 2.8;
 const FIGHTER_SCATTER_SPEED = 2.5;
+const FIGHTER_SEPARATION = 18;
+const MAX_BOSS_LOCKS = 5;
 const FIGHTER_FIRE_MIN_MS = 600;
 const FIGHTER_FIRE_MAX_MS = 1200;
 const FIGHTER_BULLET_WIDTH = 2;
@@ -141,6 +145,7 @@ let commandState = {
   fleetCount: STARTING_FLEET_COUNT,
   fleetMaxCount: STARTING_FLEET_COUNT,
   isMayhem: false,
+  isInvasion: false,
   // Control mode
   ctrlMode: 'control',
   activeOrder: null,
@@ -184,6 +189,8 @@ let commandState = {
   backspaceCount: 0,
   laserFramesRemaining: 0,
   backspaceFlashFrames: 0,
+  commandWave100Notified: false,
+  separationFrameCounter: 0,
   activePowerupLabelColor: 'rgba(255,255,255,0.7)',
   input: {
     left: false,
@@ -215,15 +222,21 @@ function clamp(value, min, max) {
 }
 
 function getPlayerBoundaryY(canvasHeight) {
-  return canvasHeight * 0.6;
+  return commandState.isInvasion ? canvasHeight * 0.45 : canvasHeight * 0.6;
 }
 
 function getFleetRowOffsets() {
-  return commandState.isMayhem ? MAYHEM_FLEET_ROW_Y : FLEET_ROW_Y;
+  return (commandState.isMayhem || commandState.isInvasion) ? MAYHEM_FLEET_ROW_Y : FLEET_ROW_Y;
 }
 
 function getFleetCapacity() {
-  return commandState.isMayhem ? MAYHEM_MAX_FLEET_COUNT : MAX_FLEET_COUNT;
+  if (commandState.isMayhem) {
+    return MAYHEM_MAX_FLEET_COUNT;
+  }
+  if (commandState.isInvasion) {
+    return INVASION_MAX_FLEET_COUNT;
+  }
+  return MAX_FLEET_COUNT;
 }
 
 function getAabb(x, y, w, h) {
@@ -244,7 +257,7 @@ function overlapsAabb(a, b) {
  * up to 3 rows as [row0, row1, row2].
  */
 function getRowCounts(total) {
-  if (commandState.isMayhem) {
+  if (commandState.isMayhem || commandState.isInvasion) {
     const counts = [0, 0, 0, 0, 0];
     let remaining = Math.max(0, total);
     for (let i = 0; i < counts.length; i += 1) {
@@ -302,6 +315,7 @@ function initializeFighters(totalCount = STARTING_FLEET_COUNT) {
         flankSide: null,
         scatterX: 0,
         scatterY: 0,
+        targetBossId: null,
       });
     }
   }
@@ -331,6 +345,171 @@ function recalculateFormation() {
 
 function getAliveFighters() {
   return commandState.fighters.filter((f) => f.hp > 0);
+}
+
+function getBossTargets() {
+  if (commandState.isMayhem) {
+    return commandState.mayhemBosses.filter((boss) => boss.hp > 0);
+  }
+  if (commandState.bossPhase && commandState.boss && commandState.boss.hp > 0) {
+    return [commandState.boss];
+  }
+  return [];
+}
+
+function releaseBossLockForFighter(fighter) {
+  if (!fighter?.targetBossId) {
+    return;
+  }
+
+  const boss = getBossTargets().find((candidate) => candidate.id === fighter.targetBossId);
+  if (boss?.lockedBy) {
+    boss.lockedBy = boss.lockedBy.filter((fighterId) => fighterId !== fighter.id);
+  }
+  fighter.targetBossId = null;
+}
+
+function acquireBossLockForFighter(fighter) {
+  if (!fighter || fighter.hp <= 0) {
+    return null;
+  }
+
+  const bosses = getBossTargets();
+  if (bosses.length === 0) {
+    releaseBossLockForFighter(fighter);
+    return null;
+  }
+
+  const existing = bosses.find((boss) => boss.id === fighter.targetBossId && boss.lockedBy?.includes(fighter.id));
+  if (existing) {
+    return existing;
+  }
+
+  releaseBossLockForFighter(fighter);
+
+  const availableBosses = bosses.filter((boss) => (boss.lockedBy?.length ?? 0) < MAX_BOSS_LOCKS);
+  if (availableBosses.length === 0) {
+    return null;
+  }
+
+  let bestBoss = null;
+  let bestDistance = Infinity;
+  for (const boss of availableBosses) {
+    const dx = boss.x - fighter.x;
+    const dy = boss.y - fighter.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestBoss = boss;
+    }
+  }
+
+  if (!bestBoss) {
+    return null;
+  }
+
+  if (!Array.isArray(bestBoss.lockedBy)) {
+    bestBoss.lockedBy = [];
+  }
+  if (!bestBoss.lockedBy.includes(fighter.id)) {
+    bestBoss.lockedBy.push(fighter.id);
+  }
+  fighter.targetBossId = bestBoss.id;
+  return bestBoss;
+}
+
+function getBossTargetForFighter(fighter, allowLock = true) {
+  const bosses = getBossTargets();
+  if (bosses.length === 0) {
+    releaseBossLockForFighter(fighter);
+    return null;
+  }
+
+  const lockedBoss = bosses.find((boss) => boss.id === fighter.targetBossId);
+  if (lockedBoss) {
+    return lockedBoss;
+  }
+
+  if (allowLock) {
+    return acquireBossLockForFighter(fighter);
+  }
+
+  let bestBoss = null;
+  let bestDistance = Infinity;
+  for (const boss of bosses) {
+    const dx = boss.x - fighter.x;
+    const dy = boss.y - fighter.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestBoss = boss;
+    }
+  }
+  return bestBoss;
+}
+
+function getCommandEnemyFireRange() {
+  const wave = Math.max(1, currentContext?.gameState?.wave ?? 1);
+  return {
+    min: Math.max(800, 2200 - (wave * 40)),
+    max: Math.max(1500, 4500 - (wave * 60)),
+  };
+}
+
+function getRandomCommandEnemyFireInterval() {
+  const range = getCommandEnemyFireRange();
+  return randomInRange(range.min, range.max);
+}
+
+function applyFighterSeparation(canvas) {
+  commandState.separationFrameCounter += 1;
+  if (commandState.separationFrameCounter % 2 !== 0) {
+    return;
+  }
+
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  const cellWidth = width / 6;
+  const cellHeight = height / 6;
+  const grid = new Map();
+  const alive = commandState.fighters.filter((fighter) => fighter.hp > 0);
+
+  const getCellKey = (fighter) => {
+    const gx = clamp(Math.floor(fighter.x / cellWidth), 0, 5);
+    const gy = clamp(Math.floor(fighter.y / cellHeight), 0, 5);
+    return `${gx},${gy}`;
+  };
+
+  for (const fighter of alive) {
+    const key = getCellKey(fighter);
+    if (!grid.has(key)) {
+      grid.set(key, []);
+    }
+    grid.get(key).push(fighter);
+  }
+
+  for (const fighter of alive) {
+    const gx = clamp(Math.floor(fighter.x / cellWidth), 0, 5);
+    const gy = clamp(Math.floor(fighter.y / cellHeight), 0, 5);
+    for (let ix = gx - 1; ix <= gx + 1; ix += 1) {
+      for (let iy = gy - 1; iy <= gy + 1; iy += 1) {
+        const neighbours = grid.get(`${ix},${iy}`);
+        if (!neighbours) continue;
+        for (const neighbour of neighbours) {
+          if (neighbour === fighter || neighbour.hp <= 0) continue;
+          const dx = fighter.x - neighbour.x;
+          const dy = fighter.y - neighbour.y;
+          const distance = Math.sqrt(dx * dx + dy * dy) || 0.001;
+          if (distance >= FIGHTER_SEPARATION) continue;
+          fighter.x += (dx / distance) * 0.8;
+          fighter.y += (dy / distance) * 0.8;
+        }
+      }
+    }
+
+    fighter.x = clamp(fighter.x, FIGHTER_WIDTH / 2, width - FIGHTER_WIDTH / 2);
+    fighter.y = clamp(fighter.y, -FIGHTER_HEIGHT, height - FIGHTER_HEIGHT / 2);
+  }
 }
 
 function getLaserDps() {
@@ -556,11 +735,21 @@ function getNearestEnemyForFighter(fighter) {
   let candidates = [];
 
   if (commandState.isMayhem) {
+    const lockedBoss = getBossTargetForFighter(fighter, fighter.state === 'ATTACKING');
+    if (lockedBoss) {
+      return lockedBoss;
+    }
     candidates = commandState.mayhemBosses.filter((boss) => boss.hp > 0);
   } else {
-    candidates = commandState.bossPhase
-      ? (commandState.boss && commandState.boss.hp > 0 ? [commandState.boss] : [])
-      : commandState.enemies;
+    if (commandState.bossPhase) {
+      const lockedBoss = getBossTargetForFighter(fighter, fighter.state === 'ATTACKING');
+      if (lockedBoss) {
+        return lockedBoss;
+      }
+      candidates = commandState.boss && commandState.boss.hp > 0 ? [commandState.boss] : [];
+    } else {
+      candidates = commandState.enemies;
+    }
   }
   for (const e of candidates) {
     if (!e || (e.hp !== undefined && e.hp <= 0)) continue;
@@ -667,6 +856,7 @@ function updateFighters(canvas, now, dt) {
 
     // Auto-return if enemies are gone while attacking/flanking/scattering
     if (allEnemiesGone && (f.state === 'ATTACKING' || f.state === 'FLANKING' || f.state === 'SCATTERED')) {
+      releaseBossLockForFighter(f);
       f.state = 'RETURNING';
     }
 
@@ -680,18 +870,24 @@ function updateFighters(canvas, now, dt) {
 
       case 'ATTACKING': {
         const target = getNearestEnemyForFighter(f);
-        if (target) {
+        const shouldHoldForBoss = Boolean(getBossTargets().length > 0 && !f.targetBossId && target);
+        if (target && !shouldHoldForBoss) {
           moveToward(f, target.x, target.y - FIGHTER_HEIGHT, FIGHTER_ATTACK_SPEED, dt);
           if (f.y < 20) {
+            releaseBossLockForFighter(f);
             f.state = 'RETURNING';
           }
+        } else if (target && shouldHoldForBoss) {
+          // Hold position and contribute fire until a boss lock slot opens.
         } else {
+          releaseBossLockForFighter(f);
           f.state = 'RETURNING';
         }
         break;
       }
 
       case 'FLANKING': {
+        releaseBossLockForFighter(f);
         const targetX = f.flankSide === 'left' ? flankMargin : canvasWidth - flankMargin;
         if (Math.abs(f.x - targetX) > 6) {
           moveToward(f, targetX, f.y, FIGHTER_FLANK_SPEED * 2, dt);
@@ -707,6 +903,7 @@ function updateFighters(canvas, now, dt) {
       }
 
       case 'SHIELDING': {
+        releaseBossLockForFighter(f);
         const { tx, ty } = getShieldWallTarget(f);
         f.x += (tx - f.x) * 0.2 * dt;
         f.y += (ty - f.y) * 0.2 * dt;
@@ -715,11 +912,13 @@ function updateFighters(canvas, now, dt) {
       }
 
       case 'SCATTERED': {
+        releaseBossLockForFighter(f);
         moveToward(f, f.scatterX, f.scatterY, FIGHTER_SCATTER_SPEED, dt);
         break;
       }
 
       case 'RETURNING': {
+        releaseBossLockForFighter(f);
         const { tx, ty } = getFormationTarget(f.row, f.col, f.totalInRow);
         const arrived = moveToward(f, tx, ty, FIGHTER_RETURN_SPEED, dt);
         if (arrived) {
@@ -733,6 +932,7 @@ function updateFighters(canvas, now, dt) {
     }
   }
 
+  applyFighterSeparation(canvas);
   fireFleetVolley(now);
   updateFighterBullets(canvas, dt);
 }
@@ -755,7 +955,10 @@ function issueOrder(orderKey) {
 
     case 'FALL_BACK':
       for (const f of commandState.fighters) {
-        if (f.hp > 0) f.state = 'RETURNING';
+        if (f.hp > 0) {
+          releaseBossLockForFighter(f);
+          f.state = 'RETURNING';
+        }
       }
       commandState.activeOrder = null;
       break;
@@ -765,9 +968,11 @@ function issueOrder(orderKey) {
       const half = Math.ceil(alive.length / 2);
       for (let i = 0; i < alive.length; i += 1) {
         if (i < half) {
+          releaseBossLockForFighter(alive[i]);
           alive[i].state = 'FLANKING';
           alive[i].flankSide = 'left';
         } else {
+          releaseBossLockForFighter(alive[i]);
           alive[i].state = 'FORMATION';
         }
       }
@@ -779,9 +984,11 @@ function issueOrder(orderKey) {
       const half = Math.ceil(alive.length / 2);
       for (let i = 0; i < alive.length; i += 1) {
         if (i >= alive.length - half) {
+          releaseBossLockForFighter(alive[i]);
           alive[i].state = 'FLANKING';
           alive[i].flankSide = 'right';
         } else {
+          releaseBossLockForFighter(alive[i]);
           alive[i].state = 'FORMATION';
         }
       }
@@ -790,13 +997,17 @@ function issueOrder(orderKey) {
 
     case 'SHIELD_WALL':
       for (const f of commandState.fighters) {
-        if (f.hp > 0) f.state = 'SHIELDING';
+        if (f.hp > 0) {
+          releaseBossLockForFighter(f);
+          f.state = 'SHIELDING';
+        }
       }
       break;
 
     case 'SCATTER':
       for (const f of commandState.fighters) {
         if (f.hp > 0) {
+          releaseBossLockForFighter(f);
           f.state = 'SCATTERED';
           f.scatterX = randomInRange(40, canvasWidth - 40);
           f.scatterY = randomInRange(boundaryY + 30, canvasHeight - 60);
@@ -808,6 +1019,7 @@ function issueOrder(orderKey) {
       recalculateFormation();
       for (const f of commandState.fighters) {
         if (f.hp > 0) {
+          releaseBossLockForFighter(f);
           const { tx, ty } = getFormationTarget(f.row, f.col, f.totalInRow);
           f.x = tx;
           f.y = ty;
@@ -1129,7 +1341,19 @@ function initializeEnemies() {
   const enemies = [];
   for (let row = 0; row < ENEMY_ROWS; row += 1) {
     for (let col = 0; col < ENEMY_COLUMNS; col += 1) {
-      enemies.push({ id: `${row}-${col}`, col, row, hp: 1, state: 'formation', x: 0, y: 0, diveTargetX: 0 });
+      const fireInterval = getRandomCommandEnemyFireInterval();
+      enemies.push({
+        id: `${row}-${col}`,
+        col,
+        row,
+        hp: 2,
+        state: 'formation',
+        x: 0,
+        y: 0,
+        diveTargetX: 0,
+        fireInterval,
+        fireTimer: randomInRange(0, fireInterval),
+      });
     }
   }
   return enemies;
@@ -1164,11 +1388,13 @@ function removeLivesHud() {
 function killFighterById(fighterId) {
   const f = commandState.fighters.find((ff) => ff.id === fighterId);
   if (!f) return;
+  releaseBossLockForFighter(f);
   f.hp = 0;
   recalculateFormation();
 }
 
 function killFighterByHit(fighter) {
+  releaseBossLockForFighter(fighter);
   fighter.hp = 0;
   recalculateFormation();
 }
@@ -1280,7 +1506,9 @@ function syncHudState(now) {
   const bossActive = Boolean(commandState.bossPhase && commandState.boss && commandState.boss.hp > 0);
   commandState.fleetCount = commandState.fighters.filter((f) => f.hp > 0).length;
   currentContext.gameState.fleetCount = commandState.fleetCount;
-  currentContext.gameState.mode = commandState.isMayhem ? 'mayhem' : 'command';
+  currentContext.gameState.mode = commandState.isMayhem
+    ? 'mayhem'
+    : (commandState.isInvasion ? 'invasion' : 'command');
   currentContext.gameState.powerups = {
     shield: commandState.shieldActive,
     multi: now < commandState.multiShotUntil,
@@ -1311,15 +1539,18 @@ function syncHudState(now) {
 function spawnBoss(canvas) {
   const canvasWidth = canvas.clientWidth || window.innerWidth;
   const now = performance.now();
+  const fireInterval = randomInRange(1800, 3200);
   commandState.boss = {
+    id: `boss-${Math.floor(now)}`,
     hp: BOSS_HP,
     maxHp: BOSS_HP,
     x: canvasWidth / 2,
     y: 80,
     direction: 1,
     flashFrames: 0,
-    nextTripleShot: now + BOSS_TRIPLE_INTERVAL_MS,
-    nextFanShot: now + BOSS_FAN_INTERVAL_MS,
+    lockedBy: [],
+    fireInterval,
+    fireTimer: randomInRange(0, fireInterval),
   };
   commandState.bossPhase = true;
   commandState.bossBullets = [];
@@ -1341,7 +1572,8 @@ function updateBoss(canvas, now, dt) {
 
   const originY = boss.y + BOSS_HEIGHT / 2;
 
-  if (now >= boss.nextTripleShot) {
+  boss.fireTimer += dt * 16.67;
+  if (boss.fireTimer >= boss.fireInterval) {
     for (let i = -1; i <= 1; i += 1) {
       const angle = i * BOSS_TRIPLE_SPREAD;
       commandState.bossBullets.push({
@@ -1351,22 +1583,8 @@ function updateBoss(canvas, now, dt) {
         vy: Math.cos(angle) * BOSS_BULLET_SPEED,
       });
     }
-    boss.nextTripleShot = now + BOSS_TRIPLE_INTERVAL_MS;
-  }
-
-  if (now >= boss.nextFanShot) {
-    const halfArc = BOSS_FAN_ARC / 2;
-    const step = BOSS_FAN_ARC / (BOSS_FAN_COUNT - 1);
-    for (let i = 0; i < BOSS_FAN_COUNT; i += 1) {
-      const angle = -halfArc + i * step;
-      commandState.bossBullets.push({
-        x: boss.x,
-        y: originY,
-        vx: Math.sin(angle) * BOSS_BULLET_SPEED,
-        vy: Math.cos(angle) * BOSS_BULLET_SPEED,
-      });
-    }
-    boss.nextFanShot = now + BOSS_FAN_INTERVAL_MS;
+    boss.fireTimer = 0;
+    boss.fireInterval = randomInRange(1800, 3200);
   }
 }
 
@@ -1447,6 +1665,12 @@ function resolveBossCollisions() {
 function handleBossDeath(now) {
   currentContext.gameState.score += BOSS_SCORE;
   if (commandState.boss) {
+    commandState.boss.lockedBy = [];
+    for (const fighter of commandState.fighters) {
+      if (fighter.targetBossId === commandState.boss.id) {
+        fighter.targetBossId = null;
+      }
+    }
     spawnBossPowerUp(commandState.boss.x, commandState.boss.y);
   }
   currentContext.audio?.playBossDeath?.();
@@ -1567,15 +1791,49 @@ function startMayhemWave(now) {
 
   commandState.mayhemActiveDropPool = pool;
   commandState.mayhemWaveBossTarget = 14 + commandState.mayhemWave;
-  commandState.mayhemSpawnedThisWave = 0;
   commandState.mayhemBosses = [];
   commandState.bossBullets = [];
-  commandState.mayhemNextBossSpawnAt = now;
+  commandState.mayhemAwaitingUpgrade = false;
+  commandState.mayhemSpawnedThisWave = commandState.mayhemWaveBossTarget;
+  commandState.mayhemNextBossSpawnAt = 0;
   commandState.mayhemNextSyncVolleyAt = now + MAYHEM_SYNC_VOLLEY_MS;
   commandState.mayhemSyncWarningUntil = 0;
-  commandState.mayhemAwaitingUpgrade = false;
   commandState.nextFleetVolleyAt = now;
   clearMayhemWaveBadge();
+
+  const canvas = currentContext?.canvas;
+  const width = canvas ? (canvas.clientWidth || window.innerWidth) : window.innerWidth;
+  const height = canvas ? (canvas.clientHeight || window.innerHeight) : window.innerHeight;
+  const bossCount = commandState.mayhemWaveBossTarget;
+
+  for (let index = 0; index < bossCount; index += 1) {
+    const row = Math.floor(index / 8);
+    const col = index % 8;
+    const rowCount = Math.min(8, bossCount - (row * 8));
+    const slotWidth = width / rowCount;
+    const patrolCenterX = slotWidth * col + (slotWidth / 2);
+    const targetY = height * (0.12 + (row * 0.10));
+    const fireInterval = randomInRange(1500, 2800);
+
+    commandState.mayhemBosses.push({
+      id: `mb-${commandState.mayhemWave}-${index}-${Math.floor(now)}`,
+      hp: MAYHEM_BOSS_HP,
+      maxHp: MAYHEM_BOSS_HP,
+      x: patrolCenterX,
+      y: -90,
+      patrolCenterX,
+      patrolMinX: Math.max(40, patrolCenterX - 60),
+      patrolMaxX: Math.min(width - 40, patrolCenterX + 60),
+      targetY,
+      direction: Math.random() < 0.5 ? -1 : 1,
+      entered: false,
+      droppedOnDeath: false,
+      phaseOffset: Math.random() * Math.PI * 2,
+      lockedBy: [],
+      fireInterval,
+      fireTimer: randomInRange(0, fireInterval),
+    });
+  }
 }
 
 function removeMayhemUpgradeSelection() {
@@ -1607,8 +1865,10 @@ function addFighters(count, now) {
       flankSide: null,
       scatterX: 0,
       scatterY: 0,
+      targetBossId: null,
     });
   }
+
   commandState.fleetMaxCount = Math.max(commandState.fleetMaxCount, getAliveFighters().length);
   recalculateFormation();
 }
@@ -1706,45 +1966,6 @@ function absorbByGroupShield(x, y) {
   return true;
 }
 
-function spawnMayhemBoss(canvas, now) {
-  if (commandState.mayhemSpawnedThisWave >= commandState.mayhemWaveBossTarget) {
-    return;
-  }
-
-  const width = canvas.clientWidth || window.innerWidth;
-  const height = canvas.clientHeight || window.innerHeight;
-  const upperZone = height * 0.4;
-  const rows = 3;
-  const cols = Math.max(1, Math.ceil(commandState.mayhemWaveBossTarget / rows));
-  const idx = commandState.mayhemSpawnedThisWave;
-  const row = idx % rows;
-  const col = Math.floor(idx / rows) % cols;
-  const rowBand = upperZone / (rows + 1);
-  const yTarget = 30 + rowBand * (row + 1);
-  const cellWidth = width / (cols + 1);
-  const patrolCenterX = cellWidth * (col + 1);
-
-  commandState.mayhemBosses.push({
-    id: `mb-${commandState.mayhemWave}-${idx}-${Math.floor(now)}`,
-    hp: MAYHEM_BOSS_HP,
-    maxHp: MAYHEM_BOSS_HP,
-    x: randomInRange(40, width - 40),
-    y: -90,
-    patrolCenterX,
-    patrolMinX: Math.max(40, patrolCenterX - 80),
-    patrolMaxX: Math.min(width - 40, patrolCenterX + 80),
-    targetY: yTarget,
-    direction: Math.random() < 0.5 ? -1 : 1,
-    entered: false,
-    droppedOnDeath: false,
-    phaseOffset: Math.random() * Math.PI * 2,
-    nextShotAt: now + randomInRange(MAYHEM_BOSS_BURST_MS * 0.5, MAYHEM_BOSS_BURST_MS),
-  });
-
-  commandState.mayhemSpawnedThisWave += 1;
-  commandState.mayhemNextBossSpawnAt = now + MAYHEM_BOSS_SPAWN_MS;
-}
-
 function fireMayhemBossBurst(boss, forceSync = false) {
   if (commandState.bossBullets.length >= MAYHEM_GLOBAL_BULLET_CAP) {
     return;
@@ -1768,10 +1989,6 @@ function fireMayhemBossBurst(boss, forceSync = false) {
 }
 
 function updateMayhemBosses(canvas, now, dt) {
-  if (commandState.mayhemSpawnedThisWave < commandState.mayhemWaveBossTarget && now >= commandState.mayhemNextBossSpawnAt) {
-    spawnMayhemBoss(canvas, now);
-  }
-
   if (now >= commandState.mayhemNextSyncVolleyAt - 1000 && commandState.mayhemSyncWarningUntil < commandState.mayhemNextSyncVolleyAt) {
     commandState.mayhemSyncWarningUntil = commandState.mayhemNextSyncVolleyAt;
   }
@@ -1780,6 +1997,8 @@ function updateMayhemBosses(canvas, now, dt) {
     for (const boss of commandState.mayhemBosses) {
       if (boss.hp > 0 && boss.entered) {
         fireMayhemBossBurst(boss, true);
+        boss.fireTimer = 0;
+        boss.fireInterval = randomInRange(1500, 2800);
       }
     }
     commandState.mayhemNextSyncVolleyAt = now + MAYHEM_SYNC_VOLLEY_MS;
@@ -1809,9 +2028,11 @@ function updateMayhemBosses(canvas, now, dt) {
       boss.direction = -1;
     }
 
-    if (now >= boss.nextShotAt) {
+    boss.fireTimer += dt * 16.67;
+    if (boss.fireTimer >= boss.fireInterval) {
       fireMayhemBossBurst(boss, false);
-      boss.nextShotAt = now + MAYHEM_BOSS_BURST_MS;
+      boss.fireTimer = 0;
+      boss.fireInterval = randomInRange(1500, 2800);
     }
   }
 
@@ -1832,6 +2053,12 @@ function resolveMayhemCollisions(now) {
       usedPlayerBullets.add(i);
       boss.hp -= 1;
       if (boss.hp <= 0) {
+        boss.lockedBy = [];
+        for (const fighter of commandState.fighters) {
+          if (fighter.targetBossId === boss.id) {
+            fighter.targetBossId = null;
+          }
+        }
         currentContext.gameState.score += MAYHEM_BOSS_SCORE * MAYHEM_SCORE_MULTIPLIER;
         commandState.mayhemTotalBossesDefeated += 1;
         if (!boss.droppedOnDeath) {
@@ -1854,6 +2081,12 @@ function resolveMayhemCollisions(now) {
       usedFighterBullets.add(i);
       boss.hp -= 1;
       if (boss.hp <= 0) {
+        boss.lockedBy = [];
+        for (const fighter of commandState.fighters) {
+          if (fighter.targetBossId === boss.id) {
+            fighter.targetBossId = null;
+          }
+        }
         currentContext.gameState.score += MAYHEM_BOSS_SCORE * MAYHEM_SCORE_MULTIPLIER;
         commandState.mayhemTotalBossesDefeated += 1;
         if (!boss.droppedOnDeath) {
@@ -2244,21 +2477,22 @@ function updateEnemyFormation(canvas, now, dt) {
 }
 
 function updateEnemyBullets(canvas, now, dt) {
-  if (now >= commandState.nextEnemyShotAt) {
-    if (commandState.enemyBullets.length < ENEMY_MAX_BULLETS) {
-      const shooters = commandState.enemies.filter((e) => e.state !== 'returning');
-      if (shooters.length > 0) {
-        const shooter = shooters[Math.floor(Math.random() * shooters.length)];
-        commandState.enemyBullets.push({
-          x: shooter.x,
-          y: shooter.y + ENEMY_HEIGHT / 2 + ENEMY_BULLET_HEIGHT / 2,
-          width: ENEMY_BULLET_WIDTH,
-          height: ENEMY_BULLET_HEIGHT,
-          speedY: ENEMY_BULLET_SPEED,
-        });
-      }
+  for (const enemy of commandState.enemies) {
+    if (enemy.state === 'returning') {
+      continue;
     }
-    scheduleNextEnemyShot(now);
+    enemy.fireTimer += dt * 16.67;
+    if (enemy.fireTimer >= enemy.fireInterval) {
+      commandState.enemyBullets.push({
+        x: enemy.x,
+        y: enemy.y + ENEMY_HEIGHT / 2 + ENEMY_BULLET_HEIGHT / 2,
+        width: ENEMY_BULLET_WIDTH,
+        height: ENEMY_BULLET_HEIGHT,
+        speedY: ENEMY_BULLET_SPEED,
+      });
+      enemy.fireTimer = 0;
+      enemy.fireInterval = getRandomCommandEnemyFireInterval();
+    }
   }
 
   const canvasHeight = canvas.clientHeight || window.innerHeight;
@@ -2461,6 +2695,27 @@ function renderCommand(ctx) {
   ctx.fillRect(barX, barY, FLEET_BAR_WIDTH * barRatio, FLEET_BAR_HEIGHT);
   ctx.shadowBlur = 0;
 
+  const drawCrackedEnemy = (enemy) => {
+    ctx.save();
+    if (enemy.hp === 1) {
+      ctx.globalAlpha = 0.45;
+      drawTriangle(ctx, enemy.x, enemy.y, ENEMY_WIDTH, ENEMY_HEIGHT, 'down', ENEMY_COLOR, 8);
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.moveTo(enemy.x - 4, enemy.y - 4);
+      ctx.lineTo(enemy.x + 4, enemy.y + 4);
+      ctx.moveTo(enemy.x - 1.5, enemy.y + 3.5);
+      ctx.lineTo(enemy.x + 2.5, enemy.y - 0.5);
+      ctx.strokeStyle = 'rgba(255,100,80,0.4)';
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    } else {
+      drawTriangle(ctx, enemy.x, enemy.y, ENEMY_WIDTH, ENEMY_HEIGHT, 'down', ENEMY_COLOR, ENEMY_GLOW);
+    }
+    ctx.restore();
+  };
+
   // Fighters
   for (const f of commandState.fighters) {
     if (f.hp <= 0) continue;
@@ -2468,6 +2723,25 @@ function renderCommand(ctx) {
     ctx.globalAlpha = 0.7;
     drawTriangle(ctx, f.x, f.y, FIGHTER_WIDTH, FIGHTER_HEIGHT, 'up', FIGHTER_COLOR, FIGHTER_GLOW);
     ctx.restore();
+  }
+
+  const bossTargets = getBossTargets();
+  if (bossTargets.length > 0) {
+    ctx.save();
+    ctx.setLineDash([4, 8]);
+    ctx.strokeStyle = 'rgba(0,255,136,0.1)';
+    ctx.lineWidth = 0.5;
+    for (const fighter of commandState.fighters) {
+      if (fighter.hp <= 0 || !fighter.targetBossId) continue;
+      const boss = bossTargets.find((candidate) => candidate.id === fighter.targetBossId);
+      if (!boss) continue;
+      ctx.beginPath();
+      ctx.moveTo(fighter.x, fighter.y);
+      ctx.lineTo(boss.x, boss.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.setLineDash([]);
   }
 
   // Player bullets
@@ -2482,7 +2756,7 @@ function renderCommand(ctx) {
 
   // Enemies
   for (const enemy of commandState.enemies) {
-    drawTriangle(ctx, enemy.x, enemy.y, ENEMY_WIDTH, ENEMY_HEIGHT, 'down', ENEMY_COLOR, ENEMY_GLOW);
+    drawCrackedEnemy(enemy);
   }
 
   for (const b of commandState.enemyBullets) {
@@ -2609,7 +2883,11 @@ function gameLoop() {
   if (
     !currentContext ||
     !currentContext.gameState.running ||
-    (currentContext.gameState.mode !== 'command' && currentContext.gameState.mode !== 'mayhem')
+    (
+      currentContext.gameState.mode !== 'command'
+      && currentContext.gameState.mode !== 'mayhem'
+      && currentContext.gameState.mode !== 'invasion'
+    )
   ) {
     return;
   }
@@ -2637,6 +2915,17 @@ function gameLoop() {
         currentContext.hud?.hideHUD?.();
         currentContext.onWave100Unlock?.();
         return;
+      }
+
+      if (
+        !commandState.isInvasion
+        &&
+        !commandState.commandWave100Notified
+        && waveEvent.wave === 100
+        && (waveEvent.action === 'spawn-boss' || waveEvent.action === 'spawn-formation')
+      ) {
+        commandState.commandWave100Notified = true;
+        currentContext.onCommandWave100?.();
       }
 
       if (waveEvent.action === 'spawn-boss') {
@@ -2702,10 +2991,13 @@ export function startCommand(context = currentContext) {
   if (!ctx) return;
 
   const isMayhemVariant = context.variant === 'mayhem';
+  const isInvasionVariant = context.variant === 'invasion';
   currentContext = { ...context, ctx, loseLife: loseCommandLife };
   syncCanvasResolution(canvas, ctx);
 
-  const initialFleetCount = isMayhemVariant ? MAYHEM_STARTING_FLEET_COUNT : STARTING_FLEET_COUNT;
+  const initialFleetCount = isMayhemVariant
+    ? MAYHEM_STARTING_FLEET_COUNT
+    : (isInvasionVariant ? INVASION_STARTING_FLEET_COUNT : STARTING_FLEET_COUNT);
   const fighters = initializeFighters(initialFleetCount);
   const cx = (canvas.clientWidth || window.innerWidth) / 2;
   const cy = (canvas.clientHeight || window.innerHeight) - 82;
@@ -2713,6 +3005,7 @@ export function startCommand(context = currentContext) {
 
   // Snap fighters to initial formation positions
   commandState.isMayhem = isMayhemVariant;
+  commandState.isInvasion = isInvasionVariant;
   const counts = getRowCounts(initialFleetCount);
   let idx = 0;
   for (let row = 0; row < counts.length; row += 1) {
@@ -2739,6 +3032,7 @@ export function startCommand(context = currentContext) {
     fleetCount: initialFleetCount,
     fleetMaxCount: initialFleetCount,
     isMayhem: isMayhemVariant,
+    isInvasion: isInvasionVariant,
     ctrlMode: 'control',
     activeOrder: null,
     hoverOffset: 0,
@@ -2780,6 +3074,8 @@ export function startCommand(context = currentContext) {
     backspaceCount: 0,
     laserFramesRemaining: 0,
     backspaceFlashFrames: 0,
+    commandWave100Notified: false,
+    separationFrameCounter: 0,
     input: {
       left: false, right: false, up: false, down: false, fire: false, axisX: 0, axisY: 0,
     },
@@ -2799,12 +3095,12 @@ export function startCommand(context = currentContext) {
     startMayhemWave(now);
   }
 
-  currentContext.gameState.mode = isMayhemVariant ? 'mayhem' : 'command';
+  currentContext.gameState.mode = isMayhemVariant ? 'mayhem' : (isInvasionVariant ? 'invasion' : 'command');
   currentContext.gameState.score = 0;
   currentContext.gameState.wave = 1;
   currentContext.gameState.running = true;
   currentContext.gameState.paused = false;
-  currentContext.gameState.lives = 3;
+  currentContext.gameState.lives = isInvasionVariant ? 80 : 3;
   syncHudState(performance.now());
   currentContext.hud?.showHUD?.();
   currentContext.hud?.updateHUD?.(currentContext.gameState);

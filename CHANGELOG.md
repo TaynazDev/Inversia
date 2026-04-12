@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-12
+- Added a main menu Cheat Codes button with an in-menu code entry panel.
+- Added Mayhem unlock cheat code: `CR4ZYM0D3`.
+- Added Invasion unlock cheat code: `1NV4S10NY4`.
+- Added Broadcast to control all troops in Invasion Mode
+
 ## 2026-04-08
 - Added shared wave controller with intermission flow, scaling, and boss wave routing.
 - Unified leaderboard storage under `inversia_scores` with rank/best/top queries.

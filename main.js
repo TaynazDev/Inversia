@@ -6,12 +6,15 @@ import { fluxMode } from './modes/flux.js';
 import { commandMode } from './modes/command.js';
 import { bridgeMode } from './modes/bridge.js';
 import { mayhemMode } from './modes/mayhem.js';
+import { invasionMode } from './modes/invasion.js';
 
 const canvas = document.getElementById('gameCanvas');
 const uiLayer = document.getElementById('ui-layer');
 const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
 const MOBILE_GLOW_CAP = 14;
 const MAYHEM_UNLOCK_KEY = 'inversia_mayhem_unlocked';
+const COMMAND_100_KEY = 'inversia_command_100';
+const INVASION_UNLOCK_KEY = 'inversia_invasion_unlocked';
 
 function getGlow(ctx, glowStrength) {
   if (ctx?.__allowFullGlow || !isTouchDevice) {
@@ -31,6 +34,7 @@ const modes = {
   command: commandMode,
   bridge: bridgeMode,
   mayhem: mayhemMode,
+  invasion: invasionMode,
 };
 
 let activeMode = null;
@@ -374,6 +378,193 @@ function showMayhemUnlockSequence() {
   laterBtn.addEventListener('click', () => finish('menu'));
 }
 
+function createInvasionUnlockOverlay() {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = [
+    'position:absolute',
+    'inset:0',
+    'z-index:42',
+    'display:flex',
+    'flex-direction:column',
+    'align-items:center',
+    'justify-content:center',
+    'gap:14px',
+    'background:rgba(0,0,0,0)',
+    'transition:background 500ms ease',
+    'pointer-events:auto',
+    'font-family:"Courier New", monospace',
+  ].join(';');
+
+  const badge = document.createElement('div');
+  badge.style.cssText = [
+    'opacity:0',
+    'transform:translateY(10px) scale(0.96)',
+    'transition:opacity 280ms ease, transform 280ms ease',
+    'background:rgba(255,255,255,0.04)',
+    'border:0.5px solid rgba(255,255,255,0.12)',
+    'border-radius:20px',
+    'backdrop-filter:blur(16px)',
+    '-webkit-backdrop-filter:blur(16px)',
+    'padding:24px 44px',
+    'text-align:center',
+  ].join(';');
+  badge.innerHTML = `
+    <div style="font-size:10px;letter-spacing:0.26em;color:rgba(255,255,255,0.38);margin-bottom:10px;">COMMAND · WAVE 100</div>
+    <div style="width:66px;height:66px;margin:0 auto 12px auto;border-radius:50%;border:2px solid #00ff88;box-shadow:0 0 28px rgba(0,255,136,0.45);"></div>
+    <div style="font-size:64px;font-weight:700;letter-spacing:0.12em;color:rgba(255,255,255,0.96);">TWICE.</div>
+  `;
+
+  const message = document.createElement('div');
+  message.style.cssText = [
+    'opacity:0',
+    'transition:opacity 260ms ease',
+    'font-size:11px',
+    'letter-spacing:0.3em',
+    'color:rgba(255,255,255,0.35)',
+    'text-transform:uppercase',
+  ].join(';');
+  message.textContent = 'THEY KNOW YOU ARE COMING';
+
+  const panel = document.createElement('div');
+  panel.style.cssText = [
+    'opacity:0',
+    'transform:translateY(8px)',
+    'transition:opacity 280ms ease, transform 280ms ease',
+    'background:rgba(20,80,255,0.06)',
+    'border:0.5px solid rgba(20,80,255,0.3)',
+    'border-radius:20px',
+    'backdrop-filter:blur(16px)',
+    '-webkit-backdrop-filter:blur(16px)',
+    'padding:32px 48px',
+    'text-align:center',
+    'max-width:420px',
+  ].join(';');
+  panel.innerHTML = `
+    <div style="font-size:10px;letter-spacing:0.3em;color:rgba(255,255,255,0.3);margin-bottom:10px;">YOU HAVE UNLOCKED</div>
+    <div style="font-size:36px;font-weight:700;letter-spacing:0.15em;color:#1a80ff;text-shadow:0 0 40px rgba(26,128,255,0.5);margin-bottom:10px;">INVASION</div>
+    <svg width="80" height="54" viewBox="0 0 100 60" aria-hidden="true" style="display:block;margin:0 auto 10px auto;overflow:visible;">
+      <path id="invasion-unlock-arc" d="M 10 52 A 42 42 0 0 1 90 52" fill="none" stroke="#1a80ff" stroke-width="2.2"/>
+    </svg>
+    <div style="font-size:11px;color:rgba(0,255,136,0.7);letter-spacing:0.15em;margin-top:16px;">5 MOTHERSHIPS · 150 FIGHTERS</div>
+    <div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.3em;margin:8px 0;">VS</div>
+    <div style="font-size:11px;color:rgba(255,50,34,0.7);letter-spacing:0.15em;">300 DEFENDERS · 5 BOSSES · 1 PLANET</div>
+  `;
+
+  const beginBtn = document.createElement('button');
+  beginBtn.type = 'button';
+  beginBtn.textContent = 'BEGIN INVASION';
+  beginBtn.style.cssText = [
+    'opacity:0',
+    'transition:opacity 280ms ease',
+    'background:rgba(20,80,255,0.08)',
+    'border:0.5px solid rgba(20,80,255,0.35)',
+    'border-radius:14px',
+    'padding:14px 38px',
+    'font-size:12px',
+    'letter-spacing:0.2em',
+    'color:#1a80ff',
+    'font-family:"Courier New", monospace',
+    'cursor:pointer',
+  ].join(';');
+
+  const laterBtn = document.createElement('button');
+  laterBtn.type = 'button';
+  laterBtn.textContent = 'NOT YET - RETURN TO MENU';
+  laterBtn.style.cssText = [
+    'opacity:0',
+    'transition:opacity 280ms ease',
+    'background:transparent',
+    'border:none',
+    'font-size:10px',
+    'letter-spacing:0.15em',
+    'color:rgba(255,255,255,0.2)',
+    'font-family:"Courier New", monospace',
+    'cursor:pointer',
+  ].join(';');
+
+  overlay.append(badge, message, panel, beginBtn, laterBtn);
+  uiLayer.appendChild(overlay);
+
+  const arc = panel.querySelector('#invasion-unlock-arc');
+  let raf = 0;
+  const pulse = () => {
+    const glow = Math.sin(Date.now() * 0.005) * 7 + 20;
+    if (arc) {
+      arc.setAttribute('style', `filter: drop-shadow(0 0 ${glow}px rgba(26,128,255,0.8));`);
+    }
+    raf = window.requestAnimationFrame(pulse);
+  };
+  raf = window.requestAnimationFrame(pulse);
+
+  return {
+    badge,
+    message,
+    panel,
+    beginBtn,
+    laterBtn,
+    dispose() {
+      window.cancelAnimationFrame(raf);
+      if (overlay.parentElement) {
+        overlay.parentElement.removeChild(overlay);
+      }
+    },
+    setBlackout() {
+      overlay.style.background = 'rgba(0,0,0,1)';
+    },
+  };
+}
+
+function showInvasionUnlockSequence() {
+  if (unlockSequenceActive) {
+    return;
+  }
+
+  unlockSequenceActive = true;
+  const seq = createInvasionUnlockOverlay();
+
+  requestAnimationFrame(() => {
+    seq.setBlackout();
+  });
+
+  window.setTimeout(() => {
+    seq.badge.style.opacity = '1';
+    seq.badge.style.transform = 'translateY(0) scale(1)';
+  }, 520);
+
+  window.setTimeout(() => {
+    seq.badge.style.opacity = '0';
+    seq.badge.style.transform = 'translateY(-14px) scale(0.94)';
+  }, 2020);
+
+  window.setTimeout(() => {
+    seq.message.style.opacity = '1';
+  }, 2140);
+
+  window.setTimeout(() => {
+    seq.message.style.opacity = '0';
+    seq.panel.style.opacity = '1';
+    seq.panel.style.transform = 'translateY(0)';
+  }, 4080);
+
+  window.setTimeout(() => {
+    seq.beginBtn.style.opacity = '1';
+    seq.laterBtn.style.opacity = '1';
+  }, 4380);
+
+  const finish = (modeName) => {
+    seq.dispose();
+    unlockSequenceActive = false;
+    if (modeName === 'invasion') {
+      startMode('invasion');
+    } else {
+      hud.showMainMenu(startMode, audio);
+    }
+  };
+
+  seq.beginBtn.addEventListener('click', () => finish('invasion'));
+  seq.laterBtn.addEventListener('click', () => finish('menu'));
+}
+
 function triggerWave100MayhemUnlock() {
   if (unlockSequenceActive) {
     return;
@@ -384,6 +575,29 @@ function triggerWave100MayhemUnlock() {
   gameState.paused = true;
   hud.hideHUD?.();
   showMayhemUnlockSequence();
+}
+
+function triggerCommandWave100Milestone() {
+  const mayhemUnlocked = localStorage.getItem(MAYHEM_UNLOCK_KEY) === 'true';
+  if (!mayhemUnlocked) {
+    return;
+  }
+
+  if (localStorage.getItem(COMMAND_100_KEY) !== 'true') {
+    localStorage.setItem(COMMAND_100_KEY, 'true');
+  }
+
+  const invasionUnlocked = localStorage.getItem(INVASION_UNLOCK_KEY) === 'true';
+  if (invasionUnlocked) {
+    return;
+  }
+
+  localStorage.setItem(INVASION_UNLOCK_KEY, 'true');
+  activeMode?.stop?.();
+  gameState.running = false;
+  gameState.paused = true;
+  hud.hideHUD?.();
+  showInvasionUnlockSequence();
 }
 
 export function drawTriangle(ctx, x, y, width, height, direction, color, glowStrength) {
@@ -516,6 +730,7 @@ export function startMode(modeName = 'flux') {
     MULTI_SHOT_DURATION_MS,
     waveController,
     onWave100Unlock: triggerWave100MayhemUnlock,
+    onCommandWave100: triggerCommandWave100Milestone,
     startMode,
   });
 }
