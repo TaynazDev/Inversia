@@ -3,8 +3,17 @@
 ## 2026-04-12
 - Added a main menu Cheat Codes button with an in-menu code entry panel.
 - Added Mayhem unlock cheat code: `CR4ZYM0D3`.
-- Added Invasion unlock cheat code: `1NV4S10NY4`.
+- Added Invasion unlock cheat code: `1NVAS10NYA`.
+- Added Invasion Skip Scene cheat code: `5K1PSC3N3` (adds a `SKIP SCENE` button in Invasion pre-battle).
 - Added Broadcast to control all troops in Invasion Mode
+- Fixed Broadcast commands so ATTACK/GROUP SHIELD are applied through active fleet behavior logic.
+- Rewrote Invasion planet health flow: normal HP now 7500, then shatter, immunity, and Last Stand core phase at 200 HP.
+- Added Last Stand combat rules: kamikaze disabled during Last Stand/final core fight with explicit broadcast-menu lockout state.
+- Added Final Assault trigger on core depletion: instant red wipe, 25 staggered 1HP green assault troops, and simultaneous 5-boss emergency defense deployment.
+- Added rare planet-destroyed ending sequence with arc collapse, layered explosion rings, blackout, and dedicated end-scene card/buttons.
+- Updated Invasion ending bonuses and stats flow to include +10,000 Total Annihilation bonus and final-assault stat tracking.
+- Replaced prior conflicting planet HP/ending behavior from earlier Prompt 26 implementation with the expanded Last Stand + Final Assault pipeline.
+- Disabled the Bridge mode main-menu card again so the cockpit placeholder remains hidden until gameplay is ready.
 
 ## 2026-04-08
 - Added shared wave controller with intermission flow, scaling, and boss wave routing.

@@ -1,6 +1,14 @@
 import { drawStarfield } from '../starfield.js';
 
-const PLANET_MAX_HP = 5000;
+const PLANET_MAX_HP = 7500;
+const PLANET_LAST_STAND_HP = 200;
+const PLANET_SHATTER_MS = 500;
+const PLANET_IMMUNITY_MS = 3000;
+const PLANET_CORE_CHARGE_MS = 2500;
+const FINAL_ASSAULT_TROOPS = 25;
+const FINAL_ASSAULT_BOSS_HP = 25;
+const FINAL_ASSAULT_BOSS_FIRE_MS = 1500;
+const FINAL_ASSAULT_TROOP_STAGGER_MS = 50;
 const PLAYER_HP_MAX = 80;
 const AI_HP_MAX = 50;
 const PLAYER_RADIUS = 32;
@@ -89,6 +97,7 @@ const SCORE_BONUS_PLANET_DESTROYED = 10000;
 const INVASION_DROP_RATE_SCALE = 1 / 3;
 
 const INVASION_SCORE_KEY = 'inversia_invasion_scores';
+const INVASION_SKIPSCENE_KEY = 'inversia_invasion_skip_scene';
 const OUTCOME_CAPTURE = 'capture';
 const OUTCOME_BONUS = 'bonus_destroy';
 const OUTCOME_LAST_STAND = 'last_stand';
@@ -140,6 +149,291 @@ function randomInRange(min, max) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function showCenterNotice(lines, durationMs = 2400) {
+  if (!state) return;
+  state.centerNotice = {
+    lines,
+    startedAt: nowMs(),
+    until: nowMs() + durationMs,
+    fadeInMs: 300,
+    fadeOutMs: 300,
+  };
+}
+
+function playPlanetCrackSound() {
+  const ctx = currentContext?.audio?.audioContext;
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(1300, t);
+  osc.frequency.exponentialRampToValueAtTime(280, t + 0.18);
+  gain.gain.setValueAtTime(0.95, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+function playPlanetThudSound() {
+  const ctx = currentContext?.audio?.audioContext;
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(70, t);
+  osc.frequency.exponentialRampToValueAtTime(35, t + 0.32);
+  gain.gain.setValueAtTime(0.65, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.35);
+}
+
+function playPlanetAnnihilationSound() {
+  const ctx = currentContext?.audio?.audioContext;
+  if (!ctx) return;
+  const t = ctx.currentTime;
+
+  const low = ctx.createOscillator();
+  const lowGain = ctx.createGain();
+  low.type = 'sine';
+  low.frequency.setValueAtTime(60, t);
+  low.frequency.exponentialRampToValueAtTime(30, t + 1.2);
+  lowGain.gain.setValueAtTime(0.95, t);
+  lowGain.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+  low.connect(lowGain);
+  lowGain.connect(ctx.destination);
+  low.start(t);
+  low.stop(t + 1.2);
+
+  const high = ctx.createOscillator();
+  const highGain = ctx.createGain();
+  high.type = 'sine';
+  high.frequency.setValueAtTime(1200, t);
+  high.frequency.exponentialRampToValueAtTime(240, t + 1.0);
+  highGain.gain.setValueAtTime(0.28, t);
+  highGain.gain.exponentialRampToValueAtTime(0.0001, t + 1.0);
+  high.connect(highGain);
+  highGain.connect(ctx.destination);
+  high.start(t);
+  high.stop(t + 1.0);
+}
+
+function isLastStandKamikazeDisabled() {
+  if (!state?.planetState) return false;
+  const phase = state.planetState.phase;
+  return phase === 'shatter' || phase === 'immunity' || phase === 'last-stand' || phase === 'final-assault' || phase === 'destroyed-sequence';
+}
+
+function spawnFinalAssaultTroop(now) {
+  const spread = randomInRange(-20, 20);
+  const fighter = makeGreenFighter('player', 'YOU', state.player.x + spread, state.player.y + randomInRange(-8, 8));
+  fighter.hp = 1;
+  fighter.maxHp = 1;
+  fighter.order = 'ATTACK';
+  fighter.finalAssaultTroop = true;
+  fighter.warpInUntil = now + 450;
+  state.playerFleet.push(fighter);
+}
+
+function deployFinalAssaultBosses(now) {
+  state.bosses = [];
+  state.bossesKilled = 0;
+  state.bossBreakoutActive = false;
+  const slotWidth = state.zones.width / 5;
+  const arcY = state.zones.planetArcY + (state.zones.planetArcWidth * 0.32);
+  for (let index = 0; index < 5; index += 1) {
+    const boss = makeBoss();
+    boss.hp = FINAL_ASSAULT_BOSS_HP;
+    boss.maxHp = FINAL_ASSAULT_BOSS_HP;
+    boss.x = slotWidth * index + (slotWidth / 2);
+    boss.y = arcY + randomInRange(-4, 4);
+    boss.targetY = state.zones.redTop + 28 + (index % 2) * 22;
+    boss.entered = false;
+    boss.fireInterval = FINAL_ASSAULT_BOSS_FIRE_MS;
+    boss.fireTimer = randomInRange(0, 500);
+    state.bosses.push(boss);
+  }
+  currentContext.audio?.play?.('bossArrival');
+}
+
+function beginPlanetDestroyedSequence(now) {
+  if (!state || state.planetDestroyedSequence) return;
+  if (!state.totalAnnihilationBonusApplied) {
+    state.score += SCORE_BONUS_PLANET_DESTROYED;
+    state.totalAnnihilationBonusApplied = true;
+  }
+
+  const centerX = state.zones.width / 2;
+  const centerY = state.zones.planetArcY + (state.zones.planetArcWidth * 0.32);
+  const segments = [];
+  for (let i = 0; i < 5; i += 1) {
+    segments.push({
+      angleStart: Math.PI * (1.15 + i * 0.14),
+      angleEnd: Math.PI * (1.23 + i * 0.14),
+      vx: randomInRange(-0.4, 0.4),
+      vy: randomInRange(-0.2, 0.35),
+      ox: 0,
+      oy: 0,
+    });
+  }
+
+  state.planetState.phase = 'destroyed-sequence';
+  state.mode = 'planet-destroyed-sequence';
+  state.redFighters = [];
+  state.redBullets = [];
+  state.bombs = [];
+  state.planetDestroyedSequence = {
+    phase: 'arc-collapse',
+    phaseStartedAt: now,
+    centerX,
+    centerY,
+    segments,
+    blackoutAlpha: 0,
+    endSceneShown: false,
+  };
+  playPlanetAnnihilationSound();
+}
+
+function triggerFinalAssault(now) {
+  if (!state || state.finalAssault.active) return;
+  state.planetState.phase = 'final-assault';
+  state.planetState.lastStandHp = 0;
+  state.finalAssault = {
+    active: true,
+    triggeredAt: now,
+    troopStartAt: now + 500,
+    bossesStartAt: now + 1500,
+    nextTroopSpawnAt: now + 500,
+    troopsSpawned: 0,
+    troopsLost: 0,
+    bossesSpawned: false,
+    bossesKilled: 0,
+    deployNoticeShown: false,
+    bossNoticeShown: false,
+  };
+  state.redFighters = [];
+  state.redBullets = [];
+  playPlanetThudSound();
+  showCenterNotice([
+    { text: 'FINAL ASSAULT', size: 10, color: 'rgba(0,255,136,0.5)' },
+    { text: '25 TROOPS DEPLOYED', size: 20, color: '#00ff88', bold: true },
+    { text: '1 HP · NO RETREAT', size: 10, color: 'rgba(0,255,136,0.3)' },
+  ], 2000);
+}
+
+function triggerPlanetShatter(now) {
+  if (!state || state.planetState.phase !== 'normal') return;
+  state.planetHp = 0;
+  state.planetState.phase = 'shatter';
+  state.planetState.phaseStartedAt = now;
+  state.planetState.immunityUntil = now + PLANET_SHATTER_MS + PLANET_IMMUNITY_MS;
+  state.planetState.coreChargeStartedAt = now + PLANET_SHATTER_MS + 500;
+  state.planetState.coreChargeUntil = state.planetState.immunityUntil;
+  state.planetState.hardFlashUntil = now + 120;
+  state.planetState.shatterToggleUntil = now + PLANET_SHATTER_MS;
+  playPlanetCrackSound();
+  showCenterNotice([
+    { text: 'PLANET CORE CRITICAL', size: 10, color: 'rgba(255,80,60,0.5)' },
+    { text: 'LAST STAND ACTIVATED', size: 22, color: '#ff3322', bold: true },
+    { text: '200 HP REMAINING', size: 10, color: 'rgba(255,80,60,0.4)' },
+  ], 2400);
+}
+
+function applyPlanetDamage(amount) {
+  if (!state || amount <= 0) return false;
+  const now = nowMs();
+  const phase = state.planetState.phase;
+  if (phase === 'shatter' || phase === 'immunity') {
+    return false;
+  }
+
+  if (phase === 'last-stand' || phase === 'final-assault') {
+    state.planetState.lastStandHp = Math.max(0, state.planetState.lastStandHp - amount);
+    if (state.planetState.lastStandHp <= 0 && phase !== 'final-assault') {
+      triggerFinalAssault(now);
+    }
+    return true;
+  }
+
+  state.planetHp = Math.max(0, state.planetHp - amount);
+  if (state.planetHp <= 0) {
+    triggerPlanetShatter(now);
+  }
+  return true;
+}
+
+function updatePlanetPhases(now) {
+  if (!state) return;
+  const ps = state.planetState;
+
+  if (ps.phase === 'shatter' && now >= ps.phaseStartedAt + PLANET_SHATTER_MS) {
+    ps.phase = 'immunity';
+    ps.phaseStartedAt = now;
+  }
+
+  if (ps.phase === 'immunity' && now >= ps.immunityUntil) {
+    ps.phase = 'last-stand';
+    ps.phaseStartedAt = now;
+    ps.lastStandHp = PLANET_LAST_STAND_HP;
+  }
+
+  if (state.finalAssault.active) {
+    if (now >= state.finalAssault.nextTroopSpawnAt && state.finalAssault.troopsSpawned < FINAL_ASSAULT_TROOPS) {
+      spawnFinalAssaultTroop(now);
+      state.finalAssault.troopsSpawned += 1;
+      state.finalAssault.nextTroopSpawnAt += FINAL_ASSAULT_TROOP_STAGGER_MS;
+    }
+
+    if (now >= state.finalAssault.bossesStartAt && !state.finalAssault.bossesSpawned) {
+      deployFinalAssaultBosses(now);
+      state.finalAssault.bossesSpawned = true;
+      showCenterNotice([
+        { text: 'COMMAND UNITS ACTIVE', size: 10, color: 'rgba(255,80,60,0.5)' },
+        { text: '5 BOSSES INCOMING', size: 20, color: '#ff3322', bold: true },
+      ], 2000);
+    }
+
+    if (state.finalAssault.bossesKilled >= 5 && state.planetState.lastStandHp <= 0) {
+      beginPlanetDestroyedSequence(now);
+    }
+  }
+
+  if (state.mode === 'planet-destroyed-sequence' && state.planetDestroyedSequence) {
+    const seq = state.planetDestroyedSequence;
+    if (seq.phase === 'arc-collapse') {
+      const dt = (now - seq.phaseStartedAt) / 16.67;
+      for (const segment of seq.segments) {
+        segment.ox += segment.vx * dt;
+        segment.oy += segment.vy * dt;
+      }
+      if (now - seq.phaseStartedAt >= 1000) {
+        seq.phase = 'explosion';
+        seq.phaseStartedAt = now;
+      }
+    } else if (seq.phase === 'explosion') {
+      if (now - seq.phaseStartedAt >= 500) {
+        seq.phase = 'blackout';
+        seq.phaseStartedAt = now;
+      }
+    } else if (seq.phase === 'blackout') {
+      seq.blackoutAlpha = clamp((now - seq.phaseStartedAt) / 800, 0, 1);
+      if (seq.blackoutAlpha >= 1) {
+        seq.phase = 'end-scene';
+        seq.phaseStartedAt = now;
+      }
+    } else if (seq.phase === 'end-scene' && !seq.endSceneShown) {
+      showPlanetDestroyedEndScene();
+      seq.endSceneShown = true;
+    }
+  }
 }
 
 function syncCanvasResolution(canvas, ctx) {
@@ -209,6 +503,7 @@ function makeAiMothership(callsign, x, y) {
     reserve: AI_TOTAL_PER_SHIP,
     onScreenMax: isTouchDevice ? AI_ONSCREEN_PER_SHIP_MOBILE : AI_ONSCREEN_PER_SHIP_DESKTOP,
     nextRespawnAt: 0,
+    nextDecisionAt: nowMs() + randomInRange(1000, 2200),
   };
 }
 
@@ -415,7 +710,42 @@ function createPreBattleUi() {
     back.style.color = 'rgba(255,255,255,0.15)';
   });
 
+  const canSkipScene = localStorage.getItem(INVASION_SKIPSCENE_KEY) === 'true';
+  let skip = null;
+  if (canSkipScene) {
+    skip = document.createElement('button');
+    skip.type = 'button';
+    skip.textContent = 'SKIP SCENE';
+    skip.style.cssText = [
+      'opacity:0',
+      'position:absolute',
+      'top:16px',
+      'right:16px',
+      'width:160px',
+      'height:38px',
+      'border-radius:10px',
+      'background:rgba(20,80,255,0.08)',
+      'border:0.5px solid rgba(20,80,255,0.35)',
+      'font-size:11px',
+      'letter-spacing:0.16em',
+      'color:rgba(160,195,255,0.92)',
+      'font-family:"Courier New", monospace',
+      'cursor:pointer',
+      'pointer-events:auto',
+      'transition:opacity 500ms ease, border-color 140ms ease',
+    ].join(';');
+    skip.addEventListener('mouseenter', () => {
+      skip.style.borderColor = 'rgba(80,150,255,0.6)';
+    });
+    skip.addEventListener('mouseleave', () => {
+      skip.style.borderColor = 'rgba(20,80,255,0.35)';
+    });
+  }
+
   root.append(planetName, cmd, invade, back);
+  if (skip) {
+    root.appendChild(skip);
+  }
   currentContext.uiLayer.appendChild(root);
 
   preBattleUi = {
@@ -424,6 +754,7 @@ function createPreBattleUi() {
     cmd,
     invade,
     back,
+    skip,
     lastChanceLabel: null,
     lastChanceButton: null,
   };
@@ -437,6 +768,11 @@ function createPreBattleUi() {
   back.addEventListener('click', () => {
     currentContext.hud?.showMainMenu?.(currentContext.startMode, currentContext.audio);
     stopInvasion();
+  });
+
+  skip?.addEventListener('click', () => {
+    if (!state || state.combatEnabled) return;
+    startCombat();
   });
 }
 
@@ -585,6 +921,32 @@ function initializeState(context) {
     shockwaves: [],
     planetBlasts: [],
     planetHp: PLANET_MAX_HP,
+    planetState: {
+      phase: 'normal',
+      phaseStartedAt: nowMs(),
+      immunityUntil: 0,
+      coreChargeStartedAt: 0,
+      coreChargeUntil: 0,
+      lastStandHp: PLANET_LAST_STAND_HP,
+      hardFlashUntil: 0,
+      shatterToggleUntil: 0,
+    },
+    centerNotice: null,
+    finalAssault: {
+      active: false,
+      triggeredAt: 0,
+      troopStartAt: 0,
+      bossesStartAt: 0,
+      nextTroopSpawnAt: 0,
+      troopsSpawned: 0,
+      troopsLost: 0,
+      bossesSpawned: false,
+      bossesKilled: 0,
+      deployNoticeShown: false,
+      bossNoticeShown: false,
+    },
+    planetDestroyedSequence: null,
+    totalAnnihilationBonusApplied: false,
     redKilled: 0,
     redDeployed: 0,
     bossesKilled: 0,
@@ -666,6 +1028,9 @@ function onBossKilled(boss) {
   }
   boss.dead = true;
   state.bossesKilled += 1;
+  if (state.finalAssault?.active) {
+    state.finalAssault.bossesKilled += 1;
+  }
   state.score += SCORE_BOSS_KILL;
   state.shockwaves.push(makeShockwave(boss.x, boss.y));
 
@@ -828,6 +1193,9 @@ function issueBroadcastOrder(order) {
 }
 
 function startKamikazeRun(forceAll = false) {
+  if (isLastStandKamikazeDisabled()) {
+    return;
+  }
   if (nowMs() < state.kamikaze.cooldownUntil) {
     return;
   }
@@ -1385,25 +1753,66 @@ function issuePlayerOrder(order) {
   }
 }
 
+function setAiShipOrder(ship, suggestion) {
+  if (!ship || ship.dead) return;
+  ship.order = suggestion;
+  const owned = state.aiFighters.filter((fighter) => !fighter.dead && fighter.ownerId === ship.callsign);
+  if (suggestion === 'BOMBARD') {
+    applyBombardOrder(owned, state.zones);
+    return;
+  }
+  for (const fighter of owned) {
+    fighter.bomberAssigned = false;
+    if (!fighter.bomberPermanentOneHp) {
+      fighter.bomber = false;
+    }
+  }
+}
+
+function updateAiMothershipStrategy(now) {
+  if (!state || state.mode !== 'active' || state.broadcast.active) {
+    return;
+  }
+
+  const redsNearBoundary = state.redFighters.filter((red) => !red.dead && red.y >= state.zones.boundaryY - 30).length;
+  const playerThreat = state.redFighters.filter((red) => !red.dead && Math.abs(red.x - state.player.x) < 120 && red.y >= state.zones.boundaryY - 20).length;
+
+  for (const ship of state.aiMotherships) {
+    if (ship.dead || now < (ship.nextDecisionAt ?? 0)) continue;
+
+    const ownedAlive = state.aiFighters.filter((fighter) => !fighter.dead && fighter.ownerId === ship.callsign).length;
+    const current = ship.order;
+    let nextOrder = current;
+
+    if (ship.hp <= AI_HP_MAX * 0.32 || ownedAlive <= 2) {
+      nextOrder = 'DEFEND';
+    } else if (state.battlePhase === 'bosses' && ownedAlive >= 6) {
+      nextOrder = 'ADVANCE';
+    } else if (playerThreat >= 8 || redsNearBoundary >= 18) {
+      nextOrder = 'SUPPORT';
+    } else if (state.redFighters.length >= 55 && ownedAlive >= 7) {
+      nextOrder = 'BOMBARD';
+    } else {
+      nextOrder = ship.compliance >= 0.8 ? 'FORMATION' : 'SUPPORT';
+    }
+
+    if (nextOrder !== current) {
+      setAiShipOrder(ship, nextOrder);
+      state.aiStatusLine = `${ship.callsign}: ${nextOrder}`;
+      state.aiStatusUntil = now + 1400;
+    }
+
+    ship.nextDecisionAt = now + randomInRange(1300, 2600);
+  }
+}
+
 function applyAiSuggestion(callsign, suggestion) {
   const ship = state.aiMotherships.find((s) => s.callsign === callsign);
   if (!ship || ship.dead) return;
 
   if (Math.random() <= ship.compliance) {
-    ship.order = suggestion;
+    setAiShipOrder(ship, suggestion);
     state.aiStatusLine = `${callsign}: ${suggestion}`;
-    if (suggestion === 'BOMBARD') {
-      const owned = state.aiFighters.filter((fighter) => !fighter.dead && fighter.ownerId === callsign);
-      applyBombardOrder(owned, state.zones);
-    } else {
-      const owned = state.aiFighters.filter((fighter) => !fighter.dead && fighter.ownerId === callsign);
-      for (const fighter of owned) {
-        fighter.bomberAssigned = false;
-        if (!fighter.bomberPermanentOneHp) {
-          fighter.bomber = false;
-        }
-      }
-    }
   } else {
     state.aiStatusLine = `${callsign}: HOLDING CURRENT ORDERS`;
   }
@@ -1563,10 +1972,18 @@ function refreshCommandModule() {
 
     const attack = mk('ATTACK');
     const shield = mk('GROUP SHIELD');
+    const kamikazeLockedByLastStand = isLastStandKamikazeDisabled();
     const kamiReadyForce = nowMs() >= state.kamikaze.cooldownUntil && state.kamikaze.forceReady;
     const kamiCooling = nowMs() < state.kamikaze.cooldownUntil;
     const kami = mk(kamiReadyForce ? 'FORCE KAMIKAZE' : 'KAMIKAZE', true);
-    if (kamiCooling) {
+    if (kamikazeLockedByLastStand) {
+      kami.textContent = 'KAMIKAZE';
+      kami.disabled = true;
+      kami.style.background = 'rgba(255,20,20,0.02)';
+      kami.style.border = '0.5px solid rgba(255,20,20,0.08)';
+      kami.style.color = 'rgba(255,255,255,0.1)';
+      kami.style.textShadow = 'none';
+    } else if (kamiCooling) {
       const sec = Math.max(1, Math.ceil((state.kamikaze.cooldownUntil - nowMs()) / 1000));
       kami.textContent = String(sec);
       kami.disabled = true;
@@ -1590,7 +2007,9 @@ function refreshCommandModule() {
     });
 
     const note = document.createElement('div');
-    note.textContent = '5% VOLUNTEER RATE · FORCE AVAILABLE AFTER 20S';
+    note.textContent = kamikazeLockedByLastStand
+      ? 'DISABLED · LAST STAND'
+      : '5% VOLUNTEER RATE · FORCE AVAILABLE AFTER 20S';
     note.style.cssText = 'font-size:9px;letter-spacing:0.12em;color:rgba(255,255,255,0.15);text-align:center;';
 
     wrap.append(attack, shield, kami, note);
@@ -1832,6 +2251,8 @@ function getAiFighterTarget(fighter, idxInOwner, owner) {
 function updateGreenFighters(dt, now) {
   const pathTick = state.frameCount % 3 === 0;
   const zones = state.zones;
+  const broadcastOrder = state.broadcast.active ? state.broadcast.order : null;
+  const hasBroadcastOrder = broadcastOrder === 'ATTACK' || broadcastOrder === 'GROUP_SHIELD';
 
   if (state.broadcast.active && state.broadcast.order === 'GROUP_SHIELD') {
     const clusterTargets = {
@@ -1864,15 +2285,17 @@ function updateGreenFighters(dt, now) {
   }
 
   const alivePlayerFleet = state.playerFleet.filter((f) => !f.dead);
+  const playerOrder = hasBroadcastOrder ? broadcastOrder : state.playerFleetOrder;
   alivePlayerFleet.forEach((f, i) => {
-    updateSingleGreenFighter(f, dt, now, pathTick, zones, getPlayerFleetFormationTarget(i), state.playerFleetOrder, null);
+    updateSingleGreenFighter(f, dt, now, pathTick, zones, getPlayerFleetFormationTarget(i), playerOrder, null);
   });
 
   for (const ship of state.aiMotherships) {
+    const shipOrder = hasBroadcastOrder ? broadcastOrder : ship.order;
     const owned = state.aiFighters.filter((f) => !f.dead && f.ownerId === ship.callsign);
     owned.forEach((f, i) => {
       const target = getAiFighterTarget(f, i, ship);
-      updateSingleGreenFighter(f, dt, now, pathTick, zones, target, ship.order, ship);
+      updateSingleGreenFighter(f, dt, now, pathTick, zones, target, shipOrder, ship);
     });
 
     if (!ship.dead) {
@@ -1900,6 +2323,27 @@ function updateGreenFighters(dt, now) {
 function updateSingleGreenFighter(f, dt, now, pathTick, zones, formationTarget, order, ownerShip) {
   if (f.dead) return;
 
+  if (f.finalAssaultTroop) {
+    const wave = Math.sin((now * 0.002) + (f.scatterSeed || 0));
+    f.targetX = (zones.width / 2) + wave * 140;
+    f.targetY = zones.redTop + 22;
+    if (pathTick) {
+      f.vx += Math.sign(f.targetX - f.x) * 0.34;
+      f.vy += Math.sign(f.targetY - f.y) * 0.38;
+    }
+    f.vx = clamp(f.vx * 0.92, -3.2, 3.2);
+    f.vy = clamp(f.vy * 0.92, -3.2, 3.2);
+    f.x += f.vx * dt;
+    f.y += f.vy * dt;
+    f.x = clamp(f.x, 10, zones.width - 10);
+    f.y = clamp(f.y, zones.redTop + 8, zones.height - 10);
+    if (now >= f.nextShotAt) {
+      f.nextShotAt = now + 360;
+      state.bombs.push(makeBomb(f.x, f.y));
+    }
+    return;
+  }
+
   if (f.kamikazeMode) {
     f.targetX = f.x;
     f.targetY = zones.planetArcY + 4;
@@ -1914,7 +2358,7 @@ function updateSingleGreenFighter(f, dt, now, pathTick, zones, formationTarget, 
     f.x = clamp(f.x, 8, zones.width - 8);
     if (f.y <= zones.planetArcY + 8) {
       state.flashRings.push(makeFlashRing(f.x, f.y, 55, 400, 300));
-      state.planetHp = Math.max(0, state.planetHp - 300);
+      applyPlanetDamage(300);
       destroyRedInRadius(f.x, f.y, 40);
       for (const ally of getAllGreenFighters()) {
         if (ally === f || ally.dead) continue;
@@ -1966,7 +2410,7 @@ function updateSingleGreenFighter(f, dt, now, pathTick, zones, formationTarget, 
       f.vy *= 0.8;
       if (now >= f.invadePauseUntil) {
         f.invadePhase = 'return';
-        state.planetHp = Math.max(0, state.planetHp - INVADE_PLANET_DAMAGE);
+        applyPlanetDamage(INVADE_PLANET_DAMAGE);
         state.score += INVADE_PLANET_DAMAGE;
         state.planetBlasts.push(makePlanetBlast(f.x, zones.planetArcY + 3));
         destroyRedInRadius(f.x, zones.planetArcY + 6, 20);
@@ -2312,7 +2756,9 @@ function updateBosses(dt, now) {
     boss.fireTimer += dt * 16.67;
     if (boss.fireTimer >= boss.fireInterval) {
       boss.fireTimer = 0;
-      boss.fireInterval = randomInRange(BOSS_FIRE_MIN_MS, BOSS_FIRE_MAX_MS);
+      boss.fireInterval = state.finalAssault?.active
+        ? FINAL_ASSAULT_BOSS_FIRE_MS
+        : randomInRange(BOSS_FIRE_MIN_MS, BOSS_FIRE_MAX_MS);
       const cap = isTouchDevice ? MAX_RED_BULLETS_MOBILE : MAX_RED_BULLETS_DESKTOP;
       if (state.redBullets.length + 6 <= cap) {
         const spreads = [-0.36, -0.2, -0.08, 0.08, 0.2, 0.36];
@@ -2337,8 +2783,9 @@ function updateBullets(dt) {
     b.y += b.vy * dt;
 
     if (b.y < zones.planetBottom) {
-      state.planetHp = Math.max(0, state.planetHp - PLANET_BULLET_DAMAGE);
-      state.score += SCORE_PLANET_TICK;
+      if (applyPlanetDamage(PLANET_BULLET_DAMAGE)) {
+        state.score += SCORE_PLANET_TICK;
+      }
       b.dead = true;
       continue;
     }
@@ -2361,10 +2808,11 @@ function updateBullets(dt) {
     if (bomb.dead) continue;
     bomb.y += bomb.vy * dt;
     if (bomb.y <= zones.planetBottom) {
-      state.planetHp = Math.max(0, state.planetHp - BOMB_DAMAGE_DOT);
-      state.score += SCORE_PLANET_TICK;
+      if (applyPlanetDamage(BOMB_DAMAGE_DOT)) {
+        state.score += SCORE_PLANET_TICK;
+      }
       if (bomb.y <= zones.planetArcY + 8) {
-        state.planetHp = Math.max(0, state.planetHp - BOMB_DAMAGE_HIT);
+        applyPlanetDamage(BOMB_DAMAGE_HIT);
         state.flashRings.push(makeFlashRing(bomb.x, bomb.y, 20, 200, 180));
         bomb.dead = true;
       }
@@ -2437,7 +2885,7 @@ function triggerBomberDeathExplosion(fighter) {
   state.flashRings.push(makeFlashRing(fighter.x, fighter.y, 35, 300, 200));
   destroyRedInRadius(fighter.x, fighter.y, 25);
   if (fighter.y <= state.zones.planetArcY + 16) {
-    state.planetHp = Math.max(0, state.planetHp - 100);
+    applyPlanetDamage(100);
   }
   currentContext.audio?.play?.('enemyDeath');
 }
@@ -2455,6 +2903,9 @@ function damageGreenFighter(fighter, amount = 1) {
     fighter.bomber = false;
     fighter.bomberAssigned = false;
     fighter.kamikazeMode = false;
+    if (fighter.finalAssaultTroop && state.finalAssault?.active) {
+      state.finalAssault.troopsLost += 1;
+    }
     state.fighterLosses += 1;
     return;
   }
@@ -2703,6 +3154,18 @@ function updateBroadcastState(now) {
     commandModuleEl.panel.style.borderColor = 'rgba(255,80,60,0.78)';
   } else if (commandModuleEl?.panel) {
     commandModuleEl.panel.style.borderColor = 'rgba(255,255,255,0.16)';
+  }
+
+  const broadcastVisible = commandModuleEl?.panel?.style.display !== 'none' && state.selectedTab === 'BROADCAST';
+  if (broadcastVisible) {
+    const cooldownSec = Math.max(0, Math.ceil((state.kamikaze.cooldownUntil - now) / 1000));
+    const countdownTick = cooldownSec !== state.lastBroadcastCooldownSecond;
+    const activePulse = state.broadcast.active && now >= (state.nextBroadcastUiRefreshAt ?? 0);
+    if (countdownTick || activePulse) {
+      refreshCommandModule();
+      state.lastBroadcastCooldownSecond = cooldownSec;
+      state.nextBroadcastUiRefreshAt = now + (state.broadcast.active ? 400 : 1000);
+    }
   }
 }
 
@@ -3083,6 +3546,114 @@ function showCaptureOverlay(outcome, summary) {
   battleOverlayEl = panel;
 }
 
+function showPlanetDestroyedEndScene() {
+  if (battleOverlayEl?.parentElement) {
+    battleOverlayEl.parentElement.removeChild(battleOverlayEl);
+  }
+
+  const aliveMotherships = (state.player.dead ? 0 : 1) + state.aiMotherships.filter((ship) => !ship.dead).length;
+  const troopsLost = Math.max(0, state.finalAssault?.troopsLost ?? 0);
+  const score = Math.max(0, Math.floor(state.score));
+
+  const panel = document.createElement('div');
+  panel.style.cssText = [
+    'position:absolute',
+    'inset:0',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'background:rgba(0,0,0,0.88)',
+    'z-index:40',
+    'font-family:"Courier New", monospace',
+    'pointer-events:auto',
+  ].join(';');
+
+  const card = document.createElement('div');
+  card.style.cssText = [
+    'background:rgba(20,80,255,0.05)',
+    'border:0.5px solid rgba(20,80,255,0.2)',
+    'border-radius:20px',
+    'backdrop-filter:blur(16px)',
+    '-webkit-backdrop-filter:blur(16px)',
+    'padding:32px 48px',
+    'text-align:center',
+    'max-width:560px',
+    'color:rgba(255,255,255,0.84)',
+  ].join(';');
+
+  card.innerHTML = `
+    <div style="font-size:13px;letter-spacing:0.3em;color:rgba(26,128,255,0.35);margin-bottom:8px;">${state.seedPlanet}</div>
+    <div style="font-size:9px;letter-spacing:0.25em;color:rgba(255,80,60,0.4);margin-bottom:16px;">SURFACE: DESTROYED</div>
+    <svg width="90" height="58" viewBox="0 0 100 60" style="display:block;margin:0 auto 16px auto;opacity:0.4;">
+      <path d="M 12 52 A 42 42 0 0 1 44 20" fill="none" stroke="#1a80ff" stroke-width="2.2"/>
+      <path d="M 50 16 A 42 42 0 0 1 70 24" fill="none" stroke="#1a80ff" stroke-width="2.2"/>
+      <path d="M 78 30 A 42 42 0 0 1 90 52" fill="none" stroke="#1a80ff" stroke-width="2.2"/>
+    </svg>
+    <div style="font-size:10px;letter-spacing:0.3em;color:rgba(26,128,255,0.45);margin-bottom:8px;">PLANET DESTROYED</div>
+    <div style="font-size:28px;font-weight:700;letter-spacing:0.12em;color:#1a80ff;text-shadow:0 0 40px rgba(26,128,255,0.4);margin-bottom:12px;">${state.seedPlanet}</div>
+    <div style="height:1px;background:rgba(255,255,255,0.06);margin:16px 0;"></div>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:6px 24px;font-size:11px;letter-spacing:0.14em;color:rgba(255,255,255,0.72);text-align:left;">
+      <div>SCORE</div><div>${score}</div>
+      <div>LAST STAND HP</div><div>0 / ${PLANET_LAST_STAND_HP}</div>
+      <div>BOSSES KILLED</div><div>${Math.max(0, state.finalAssault?.bossesKilled ?? 0)} / 5</div>
+      <div>TROOPS LOST</div><div>${troopsLost} / ${FINAL_ASSAULT_TROOPS}</div>
+      <div>MOTHERSHIPS</div><div>${aliveMotherships} / 5</div>
+      <div>FIGHTERS LOST</div><div>${state.fighterLosses}</div>
+    </div>
+    <div style="font-size:9px;letter-spacing:0.2em;color:rgba(26,128,255,0.58);margin-top:10px;">+10,000 TOTAL ANNIHILATION BONUS</div>
+    <div style="font-size:9px;letter-spacing:0.2em;color:rgba(26,128,255,0.3);margin-top:6px;">TOTAL ANNIHILATION</div>
+  `;
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex;justify-content:center;gap:10px;margin-top:20px;';
+
+  const returnBtn = document.createElement('button');
+  returnBtn.type = 'button';
+  returnBtn.textContent = 'RETURN TO FLEET';
+  returnBtn.style.cssText = [
+    'background:rgba(20,80,255,0.08)',
+    'border:0.5px solid rgba(20,80,255,0.35)',
+    'border-radius:12px',
+    'padding:11px 16px',
+    'font-size:11px',
+    'letter-spacing:0.18em',
+    'color:#1a80ff',
+    'font-family:"Courier New", monospace',
+    'cursor:pointer',
+  ].join(';');
+
+  const menuBtn = document.createElement('button');
+  menuBtn.type = 'button';
+  menuBtn.textContent = 'MAIN MENU';
+  menuBtn.style.cssText = [
+    'background:rgba(255,255,255,0.05)',
+    'border:0.5px solid rgba(255,255,255,0.18)',
+    'border-radius:12px',
+    'padding:11px 16px',
+    'font-size:11px',
+    'letter-spacing:0.18em',
+    'color:rgba(255,255,255,0.8)',
+    'font-family:"Courier New", monospace',
+    'cursor:pointer',
+  ].join(';');
+
+  returnBtn.addEventListener('click', () => {
+    currentContext.hud?.showMainMenu?.(currentContext.startMode, currentContext.audio);
+    stopInvasion();
+  });
+
+  menuBtn.addEventListener('click', () => {
+    currentContext.hud?.showMainMenu?.(currentContext.startMode, currentContext.audio);
+    stopInvasion();
+  });
+
+  actions.append(returnBtn, menuBtn);
+  card.appendChild(actions);
+  panel.appendChild(card);
+  currentContext.uiLayer.appendChild(panel);
+  battleOverlayEl = panel;
+}
+
 function failInvasion() {
   completeInvasion(OUTCOME_FAILED);
 }
@@ -3114,8 +3685,8 @@ function updateGameStateHUD(now) {
   currentContext.gameState.bossActive = false;
   currentContext.gameState.invasion = {
     planetName: state.mode === 'finished' ? state.seedPlanet : '???',
-    planetHp: Math.max(0, Math.ceil(state.planetHp)),
-    planetMaxHp: PLANET_MAX_HP,
+    planetHp: Math.max(0, Math.ceil(state.planetState.phase === 'normal' ? state.planetHp : state.planetState.lastStandHp)),
+    planetMaxHp: state.planetState.phase === 'normal' ? PLANET_MAX_HP : PLANET_LAST_STAND_HP,
     redKilled: state.redKilled,
     redTotal: RED_TOTAL_TARGET,
     bossesKilled: state.bossesKilled,
@@ -3130,9 +3701,11 @@ function updateGameStateHUD(now) {
 
 function renderPlanet(ctx) {
   const { zones } = state;
+  const ps = state.planetState;
   const centerX = zones.width / 2;
   const arcRadius = zones.planetArcWidth * 0.32;
   const pulseBoost = state.pendingCapture?.pulseIntensity ? state.pendingCapture.pulseIntensity * 36 : 0;
+  const now = nowMs();
 
   const grad = ctx.createRadialGradient(centerX, zones.planetArcY + 20, 10, centerX, zones.planetArcY + 26, zones.planetArcWidth * 0.36);
   grad.addColorStop(0, 'rgba(20,80,255,0.04)');
@@ -3142,23 +3715,77 @@ function renderPlanet(ctx) {
   ctx.arc(centerX, zones.planetArcY + 28, zones.planetArcWidth * 0.33, 0, Math.PI * 2);
   ctx.fill();
 
+  let strokeColor = '#1a80ff';
+  let lineWidth = 2;
+  let shadowBlur = 24 + pulseBoost;
+  let arcStart = Math.PI * 1.15;
+  let arcEnd = Math.PI * 1.85;
+  let arcAlpha = 1;
+
+  if (ps.phase === 'shatter') {
+    const flick = Math.floor((now - ps.phaseStartedAt) / 50) % 2;
+    arcAlpha = flick ? 1 : 0.1;
+    shadowBlur = now < ps.hardFlashUntil ? 80 : 0;
+  } else if (ps.phase === 'immunity') {
+    strokeColor = 'rgba(255,255,255,0.6)';
+    shadowBlur = 35 + Math.sin(now * 0.008) * 15;
+  } else if (ps.phase === 'last-stand' || ps.phase === 'final-assault' || ps.phase === 'destroyed-sequence') {
+    lineWidth = 3;
+    shadowBlur = 30;
+    arcEnd = Math.PI * 1.79;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = arcAlpha;
   ctx.beginPath();
-  ctx.arc(centerX, zones.planetArcY + arcRadius, arcRadius, Math.PI * 1.15, Math.PI * 1.85);
-  ctx.strokeStyle = '#1a80ff';
-  ctx.lineWidth = 2;
-  ctx.shadowColor = '#1a80ff';
-  ctx.shadowBlur = 24 + pulseBoost;
+  ctx.arc(centerX, zones.planetArcY + arcRadius, arcRadius, arcStart, arcEnd);
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = lineWidth;
+  ctx.shadowColor = strokeColor;
+  ctx.shadowBlur = shadowBlur;
   ctx.stroke();
   ctx.shadowBlur = 0;
+  ctx.restore();
 
   const hpRatio = clamp(state.planetHp / PLANET_MAX_HP, 0, 1);
+  const coreRatio = clamp(ps.lastStandHp / PLANET_LAST_STAND_HP, 0, 1);
   const barW = zones.planetArcWidth;
   const barX = centerX - barW / 2;
   const barY = zones.planetArcY + 52;
-  ctx.fillStyle = 'rgba(26,128,255,0.25)';
-  ctx.fillRect(barX, barY, barW, 3);
-  ctx.fillStyle = '#1a80ff';
-  ctx.fillRect(barX, barY, barW * hpRatio, 3);
+
+  if (ps.phase === 'immunity') {
+    const elapsed = now - ps.phaseStartedAt;
+    if (elapsed < 500) {
+      ctx.fillStyle = 'rgba(20,20,20,0.65)';
+      ctx.fillRect(barX, barY, barW, 3);
+    } else {
+      const charge = clamp((elapsed - 500) / PLANET_CORE_CHARGE_MS, 0, 1);
+      ctx.fillStyle = 'rgba(255,40,20,0.08)';
+      ctx.fillRect(barX, barY, barW, 3);
+      ctx.strokeStyle = 'rgba(255,40,20,0.3)';
+      ctx.strokeRect(barX, barY - 1, barW, 5);
+      ctx.fillStyle = '#ff3322';
+      ctx.fillRect(barX, barY, barW * charge, 3);
+    }
+  } else if (ps.phase === 'last-stand' || ps.phase === 'final-assault' || ps.phase === 'destroyed-sequence') {
+    ctx.fillStyle = 'rgba(255,40,20,0.08)';
+    ctx.fillRect(barX, barY, barW, 3);
+    ctx.strokeStyle = 'rgba(255,40,20,0.3)';
+    ctx.strokeRect(barX, barY - 1, barW, 5);
+    ctx.fillStyle = '#ff3322';
+    ctx.fillRect(barX, barY, barW * coreRatio, 3);
+    ctx.fillStyle = 'rgba(255,80,60,0.85)';
+    ctx.font = '10px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`LAST STAND · ${Math.max(0, Math.ceil(ps.lastStandHp))} / ${PLANET_LAST_STAND_HP}`, centerX, barY + 13);
+    return;
+  } else {
+    ctx.fillStyle = 'rgba(26,128,255,0.25)';
+    ctx.fillRect(barX, barY, barW, 3);
+    ctx.fillStyle = '#1a80ff';
+    ctx.fillRect(barX, barY, barW * hpRatio, 3);
+  }
+
   ctx.fillStyle = 'rgba(120,170,255,0.8)';
   ctx.font = '10px "Courier New", monospace';
   ctx.textAlign = 'center';
@@ -3226,6 +3853,14 @@ function drawFighterBatch(ctx, fighters, color, glow, direction = 'up') {
 
 function drawGreenFighter(ctx, fighter) {
   if (fighter.dead) return;
+  if (fighter.warpInUntil && nowMs() < fighter.warpInUntil) {
+    const t = clamp((fighter.warpInUntil - nowMs()) / 450, 0, 1);
+    const scale = 1 + t * 1.6;
+    ctx.save();
+    ctx.globalAlpha = 1 - t;
+    currentContext.drawTriangle(ctx, fighter.x, fighter.y, GREEN_FIGHTER_W * scale, GREEN_FIGHTER_H * scale, 'up', '#00ff88', 14);
+    ctx.restore();
+  }
   if (fighter.armorBroken || fighter.hp <= 1) {
     ctx.save();
     ctx.globalAlpha = 0.45;
@@ -3273,7 +3908,14 @@ function renderInvasion(ctx, now) {
   ctx.clearRect(0, 0, zones.width, zones.height);
 
   if (state.starfieldBuffer) {
-    ctx.drawImage(state.starfieldBuffer, 0, 0, zones.width, zones.height);
+    if (state.mode === 'planet-destroyed-sequence' && state.planetDestroyedSequence?.phase === 'end-scene') {
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(state.starfieldBuffer, 0, 0, zones.width, zones.height);
+      ctx.restore();
+    } else {
+      ctx.drawImage(state.starfieldBuffer, 0, 0, zones.width, zones.height);
+    }
   } else {
     drawStarfield(ctx);
   }
@@ -3419,6 +4061,73 @@ function renderInvasion(ctx, now) {
     ctx.fillRect(0, 0, zones.width, zones.height);
   }
 
+  if (state.mode === 'planet-destroyed-sequence' && state.planetDestroyedSequence) {
+    const seq = state.planetDestroyedSequence;
+    if (seq.phase === 'arc-collapse') {
+      const t = clamp((now - seq.phaseStartedAt) / 1000, 0, 1);
+      for (const segment of seq.segments) {
+        ctx.beginPath();
+        ctx.arc(seq.centerX + segment.ox, seq.centerY + segment.oy, zones.planetArcWidth * 0.32, segment.angleStart, segment.angleEnd);
+        ctx.strokeStyle = `rgba(26,128,255,${1 - t})`;
+        ctx.lineWidth = 2;
+        ctx.shadowColor = '#1a80ff';
+        ctx.shadowBlur = 20;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+    } else if (seq.phase === 'explosion') {
+      const t = clamp((now - seq.phaseStartedAt) / 500, 0, 1);
+      const rings = [
+        { r: 80, color: `rgba(255,255,255,${0.9 * (1 - t)})`, d: 0.3 },
+        { r: 140, color: `rgba(26,128,255,${0.6 * (1 - t)})`, d: 0.45 },
+        { r: 200, color: `rgba(26,128,255,${0.2 * (1 - t)})`, d: 0.5 },
+      ];
+      for (const ring of rings) {
+        const rt = clamp(t / ring.d, 0, 1);
+        ctx.beginPath();
+        ctx.arc(seq.centerX, seq.centerY, ring.r * rt, 0, Math.PI * 2);
+        ctx.strokeStyle = ring.color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    } else if (seq.phase === 'blackout') {
+      ctx.fillStyle = `rgba(0,0,0,${seq.blackoutAlpha})`;
+      ctx.fillRect(0, 0, zones.width, zones.height);
+    }
+  }
+
+  if (state.centerNotice && now < state.centerNotice.until) {
+    const notice = state.centerNotice;
+    const elapsed = now - notice.startedAt;
+    const remaining = notice.until - now;
+    let alpha = 1;
+    if (elapsed < notice.fadeInMs) alpha = clamp(elapsed / notice.fadeInMs, 0, 1);
+    if (remaining < notice.fadeOutMs) alpha = Math.min(alpha, clamp(remaining / notice.fadeOutMs, 0, 1));
+
+    const h = 92;
+    const w = 360;
+    const x = zones.width / 2 - w / 2;
+    const y = zones.height / 2 - h / 2;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = 'rgba(255,40,20,0.08)';
+    ctx.strokeStyle = 'rgba(255,40,20,0.28)';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    ctx.textAlign = 'center';
+    notice.lines.forEach((line, idx) => {
+      ctx.fillStyle = line.color;
+      ctx.font = `${line.bold ? '700 ' : ''}${line.size}px "Courier New", monospace`;
+      ctx.fillText(line.text, zones.width / 2, y + 24 + idx * 26);
+    });
+    ctx.restore();
+  }
+
+  if (state.centerNotice && now >= state.centerNotice.until) {
+    state.centerNotice = null;
+  }
+
   positionLastChanceUi();
 }
 
@@ -3427,7 +4136,13 @@ function updateInvasion(now, dt) {
     return;
   }
 
+  if (state.mode === 'planet-destroyed-sequence') {
+    updatePlanetPhases(now);
+    return;
+  }
+
   updateAmbientRamp(now);
+  updatePlanetPhases(now);
 
   if (!state.combatEnabled) {
     updateSequence(now);
@@ -3459,6 +4174,7 @@ function updateInvasion(now, dt) {
 
   if (state.mode === 'active') {
     updatePlayer(dt, now);
+    updateAiMothershipStrategy(now);
   }
 
   updateGreenFighters(dt, now);
@@ -3474,10 +4190,18 @@ function updateInvasion(now, dt) {
     enterCommsLost();
   }
 
+  if (state.mode === 'active' && state.finalAssault.active) {
+    const allMothershipsDead = state.player.dead && state.aiMotherships.every((ship) => ship.dead);
+    const noFightersLeft = state.playerFleet.length === 0 && state.aiFighters.length === 0;
+    if (allMothershipsDead && noFightersLeft) {
+      enterCommsLost();
+    }
+  }
+
   const allRedsDown = state.battlePhase !== 'fighters' && state.redFighters.length === 0;
   const allBossesDown = state.bossesKilled >= 5;
 
-  if ((isVictory() || (allRedsDown && allBossesDown)) && state.mode !== 'finished') {
+  if (!state.finalAssault.active && (isVictory() || (allRedsDown && allBossesDown)) && state.mode !== 'finished') {
     const outcome = state.planetHp <= 0 ? OUTCOME_BONUS : (state.mode === 'spectator' ? OUTCOME_LAST_STAND : OUTCOME_CAPTURE);
     beginCaptureSequence(outcome);
     return;
@@ -3568,10 +4292,11 @@ export function startInvasion(context = currentContext) {
   currentContext.gameState.fleetCount = PLAYER_FLEET_MAX;
   state.ambientTargetVolume = currentContext.audio?.getMasterVolume?.() ?? 1;
   currentContext.audio?.setMasterVolume?.(0);
-
   createPreBattleUi();
+
   addEventHandlers();
   currentContext.hud?.hideHUD?.();
+
   lastFrameTime = 0;
   animationFrameId = window.requestAnimationFrame(gameLoop);
 }

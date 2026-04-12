@@ -185,6 +185,9 @@ export const AudioEngine = {
   get audioContext() {
     return context;
   },
+  get outputNode() {
+    return masterGain;
+  },
   resume() {
     return init();
   },

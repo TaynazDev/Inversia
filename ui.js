@@ -6,8 +6,10 @@ const PREF_SHOW_LEADERBOARD = 'inversia_pref_show_leaderboard';
 const PREF_MASTER_VOLUME = 'inversia_pref_master_volume';
 const MAYHEM_UNLOCK_KEY = 'inversia_mayhem_unlocked';
 const INVASION_UNLOCK_KEY = 'inversia_invasion_unlocked';
+const INVASION_SKIPSCENE_KEY = 'inversia_invasion_skip_scene';
 const MAYHEM_CHEAT_CODE = 'CR4ZYM0D3';
-const INVASION_CHEAT_CODE = '1NV4S10NY4';
+const INVASION_CHEAT_CODE = '1NVAS10NYA';
+const INVASION_SKIPSCENE_CHEAT_CODE = '5K1PSC3N3';
 
 function ensureMenuStyles() {
   if (document.getElementById(MENU_STYLE_ID)) {
@@ -1438,6 +1440,15 @@ export function createHUD(uiLayer) {
         if (code === INVASION_CHEAT_CODE) {
           localStorage.setItem(INVASION_UNLOCK_KEY, 'true');
           status.textContent = 'INVASION UNLOCKED';
+          status.style.color = 'rgba(130,175,255,0.95)';
+          window.setTimeout(() => {
+            showMainMenu(startModeHandler, audioEngineRef);
+          }, 220);
+          return;
+        }
+        if (code === INVASION_SKIPSCENE_CHEAT_CODE) {
+          localStorage.setItem(INVASION_SKIPSCENE_KEY, 'true');
+          status.textContent = 'INVASION SKIP SCENE ENABLED';
           status.style.color = 'rgba(130,175,255,0.95)';
           window.setTimeout(() => {
             showMainMenu(startModeHandler, audioEngineRef);
